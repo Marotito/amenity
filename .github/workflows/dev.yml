@@ -1,7 +1,7 @@
 # Amenity+ (Marote's fork): a test build on every push to amenity-plus, or by hand.
 # Not a release: no attestation, no draft. It builds
 #   - the firmware package (amenity.fwsc), as an Actions artifact, to flash only after the emulator works
-#   - the browser emulator, published on this repository's GitHub Pages (Settings > Pages > Source: GitHub Actions)
+#   - the site on this repository's GitHub Pages, as upstream's: installer (install/), emulator (emu/), manual, breaks
 # Same toolchain, SDK tag and emsdk as upstream's release.yml / zvenson/fm1-build.
 name: Amenity+ dev build
 
@@ -59,15 +59,22 @@ jobs:
           git -C "$RUNNER_TEMP/emsdk" checkout -q a2b92777574c2feda07994cd4f1079a3dfc151f8
           "$RUNNER_TEMP/emsdk/emsdk" install 6.0.10
           "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.10
-      - name: Firmware and emulator
+      - name: Firmware, emulator and site (installer included)
+        env:
+          VERSION: 2.0.1-dev${{ github.run_number }}
         run: |
           set -euo pipefail
-          ./build.sh
-          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
-          ./build.sh --web
+          # a release-style build: the installer checks the package's identity, and the FM-1 shows the version,
+          # so the screen tells this build apart from upstream's 2.0
+          ./build.sh --release "$VERSION"
+          set +u; source "$RUNNER_TEMP/emsdk/emsdk_env.sh"; set -u
+          ./build.sh --web --release "$VERSION"
           test -f app/build/emu/app.wasm
+          python3 base/tools/make_site.py app "app/build/amenity-$VERSION.fwsc" "$VERSION" build/site
+          mkdir -p build/site/breaks
+          cp web/breaks/*.html web/breaks/*.js build/site/breaks/
           mkdir -p out/fw
-          cp app/build/amenity.fwsc out/fw/amenity-plus-dev.fwsc
+          cp "app/build/amenity-$VERSION.fwsc" out/fw/
           (cd out/fw && sha256sum * > SHA256SUMS)
       - name: Host tests (upstream's)
         continue-on-error: true
@@ -79,7 +86,7 @@ jobs:
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: app/build/emu
+          path: build/site
 
   deploy:
     needs: build
