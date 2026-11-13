@@ -1,0 +1,92 @@
+# Amenity+ (Marote's fork): a test build on every push to amenity-plus, or by hand.
+# Not a release: no attestation, no draft. It builds
+#   - the firmware package (amenity.fwsc), as an Actions artifact, to flash only after the emulator works
+#   - the browser emulator, published on this repository's GitHub Pages (Settings > Pages > Source: GitHub Actions)
+# Same toolchain, SDK tag and emsdk as upstream's release.yml / zvenson/fm1-build.
+name: Amenity+ dev build
+
+on:
+  push:
+    branches: [amenity-plus]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: amenity-plus-dev
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Python packages and fonts
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y -qq libfribidi0
+          python3 -m pip install -q Pillow numpy scipy
+      - name: JieLi Linux toolchain (pkgman.jieliapp.com)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.jieli
+          curl -fL --retry 3 https://pkgman.jieliapp.com/s/linux-toolchain | tar -xJ -C ~/.jieli
+          TC="$(ls -d ~/.jieli/jieli-linux-toolchains-* | sort | tail -1)"
+          ln -sfn "$(basename "$TC")" ~/.jieli/toolchain
+          echo "JIELI_TOOLCHAIN=$HOME/.jieli/toolchain" >> "$GITHUB_ENV"
+      - name: JieLi AC79 SDK (gitee.com, the tag upstream uses)
+        run: |
+          for i in 1 2 3; do
+            git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 \
+                https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git ~/fw-AC79_AIoT_SDK && break
+            rm -rf ~/fw-AC79_AIoT_SDK; sleep 20
+          done
+          test -d ~/fw-AC79_AIoT_SDK
+          echo "AC79_SDK=$HOME/fw-AC79_AIoT_SDK" >> "$GITHUB_ENV"
+      - name: Emscripten 6.0.10 (as upstream)
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/emscripten-core/emsdk.git "$RUNNER_TEMP/emsdk"
+          git -C "$RUNNER_TEMP/emsdk" checkout -q a2b92777574c2feda07994cd4f1079a3dfc151f8
+          "$RUNNER_TEMP/emsdk/emsdk" install 6.0.10
+          "$RUNNER_TEMP/emsdk/emsdk" activate 6.0.10
+      - name: Firmware and emulator
+        run: |
+          set -euo pipefail
+          ./build.sh
+          source "$RUNNER_TEMP/emsdk/emsdk_env.sh"
+          ./build.sh --web
+          test -f app/build/emu/app.wasm
+          mkdir -p out/fw
+          cp app/build/amenity.fwsc out/fw/amenity-plus-dev.fwsc
+          (cd out/fw && sha256sum * > SHA256SUMS)
+      - name: Host tests (upstream's)
+        continue-on-error: true
+        run: sh tests/run_tests.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amenity-plus-firmware
+          path: out/fw
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app/build/emu
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
