@@ -18,6 +18,7 @@
  * Part of fm1-base's unity build, after the platform: gfx.c is in scope. */
 #include "jungle.h"
 #include "jungle_mul.h"
+#include "music.h"                      /* Amenity+ */
 
 /* ------------------------------------------------------------------ audio --- */
 /* What the render makes is heard one block later (the I2S buffer's other half): the engine works on that time, so
@@ -40,6 +41,7 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
     if (muted)
         return;
     jungle_render(lr, n, now_ticks() + HEARD_TICKS);
+    music_render(lr, n);                     /* Amenity+: bass, rhythm and pad beside the break */
     for (i = 0; i < 2u * n; i++)
         lr[i] = mul_shr(lr[i], (int32_t)master_q12, 12);
 }
@@ -183,6 +185,7 @@ static void select_break(unsigned i)
 void app_init(void)
 {
     jungle_init();
+    music_init();
     order_load();
     user_scan();
     select_break(0);
@@ -193,6 +196,7 @@ void app_init(void)
     jungle_warp(st.warp);
     jungle_feedback(st.feedback);
     jungle_feedback_note(st.root);
+    music_root(st.root);
     jungle_lofi(st.lofi);
     jungle_pitch(st.transpose);
 }
@@ -221,6 +225,7 @@ static void keys_input(uint32_t keys, uint32_t btn)
             if (down >> i & 1u) {
                 st.root = (5u + i) % 12u;    /* key 0 is F3 */
                 jungle_feedback_note(st.root);
+                music_root(st.root);                 /* Amenity+: the music's key, from the next phrase */
                 app_say("FEEDBACK ROOT", NOTE_NAME[st.root]);
             }
         if (down)
@@ -260,6 +265,8 @@ static void keys_input(uint32_t keys, uint32_t btn)
     }
 }
 
+static struct { unsigned level, bass, timbre, pool; } mus = { MUSIC_OFF, MBASS_LONG, MTIMBRE_REESE, MPOOL_MIX };
+
 static void buttons_input(uint32_t btn, uint32_t now)
 {
     uint32_t pressed = btn & ~ui.btn, released = ui.btn & ~btn;
@@ -282,6 +289,32 @@ static void buttons_input(uint32_t btn, uint32_t now)
     }
     if (PRESSED(B_REC))
         jungle_freeze(st.frozen = !st.frozen);
+    /* Amenity+ (provisional, for the first tests): ARP the music's level, LFO the bass line, GLO the bass sound,
+     * SAVE the rhythm layer's pool */
+    if (PRESSED(B_ARP)) {
+        static const char *const LV[MUSIC_LEVELS] = { "OFF", "BASS", "BASS + RHYTHM", "FULL (+ PAD)", "MAX (CPU TEST)" };
+        mus.level = (mus.level + 1u) % MUSIC_LEVELS;
+        music_level(mus.level);
+        app_say("MUSIC", LV[mus.level]);
+    }
+    if (PRESSED(B_LFO)) {
+        static const char *const BM[MBASS_MODES] = { "KICK", "LONG", "RAGGA", "ACID" };
+        mus.bass = (mus.bass + 1u) % MBASS_MODES;
+        music_bass_mode(mus.bass);
+        app_say("BASS LINE", BM[mus.bass]);
+    }
+    if (PRESSED(B_GLO)) {
+        static const char *const BT[MTIMBRES] = { "SUB", "ACID", "REESE" };
+        mus.timbre = (mus.timbre + 1u) % MTIMBRES;
+        music_bass_timbre(mus.timbre);
+        app_say("BASS SOUND", BT[mus.timbre]);
+    }
+    if (PRESSED(B_SAVE)) {
+        static const char *const PL[MPOOLS] = { "SKANK FAMILY", "JAZZ FAMILY", "MIXED" };
+        mus.pool = (mus.pool + 1u) % MPOOLS;
+        music_pool(mus.pool);
+        app_say("RHYTHM", PL[mus.pool]);
+    }
     if (PRESSED(B_SEQ))
         jungle_auto_roll(st.auto_roll = !st.auto_roll);
     if (PRESSED(B_HOME)) {                   /* the plain break: no variation or warp until K2 / K3 turn again */

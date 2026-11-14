@@ -26,6 +26,7 @@
 #include "fm1_sea.h"
 #include "jungle_libc.h"
 #include "jungle_mul.h"
+#include "music.h"     /* Amenity+: the music follows the break */
 
 #ifndef FM1_AUDIO_DATA
 #define FM1_AUDIO_DATA
@@ -592,6 +593,7 @@ static JUNGLE_AUDIO_CODE void trigger(unsigned slice, int pitch, int32_t gain, u
     v->gate = (uint16_t)gate;
     v->active = 1;
     v->releasing = 0;
+    music_hit(slice, pitch, sample_now);              /* Amenity+ */
 #ifdef JUNGLE_TRACE
     jungle_host_trigger(jungle_host_frame, slice, pitch, gain);
 #endif
@@ -648,6 +650,7 @@ static JUNGLE_AUDIO_CODE void on_tick(void)
         if (v->active && v->gate && --v->gate == 0) v->releasing = 1;
     }
     if (bar_tick == 0 && (!ctl_freeze || !pattern_ready)) generate();
+    if (offset == 0) music_step(step, sample_now);   /* Amenity+: after generate(), the phrase's pattern is ready */
     if (offset == 0) {
         uint8_t request = ctl_straight;
         if (request != seen_straight) {
