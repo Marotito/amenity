@@ -66,7 +66,9 @@ jobs:
           set -euo pipefail
           # a release-style build: the installer checks the package's identity, and the FM-1 shows the version,
           # so the screen tells this build apart from upstream's 2.0
-          ./build.sh --release "$VERSION"
+          ./build.sh --release "$VERSION" 2>&1 | tee build.log
+          # the memory budget as annotations on the run (readable without signing in): RAM, pool, flash image
+          grep -E "image [0-9]+ B|SRAM|pool|cache RAM" build.log | while read -r l; do echo "::notice title=Memory::$l"; done || true
           set +u; source "$RUNNER_TEMP/emsdk/emsdk_env.sh"; set -u
           ./build.sh --web --release "$VERSION"
           test -f app/build/emu/app.wasm

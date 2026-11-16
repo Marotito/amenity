@@ -1,11 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
-/* Amenity+: the music that follows the break. From the host prototypes (proto2..7, Marote's feedback):
+/* Facility: the tracks that follow the break (track 1, Amenity's own). From the host prototypes (proto2..7,
+ * Marote's feedback):
  *   a conductor     two progressions (i-VI-III-VII, i-iv-i-v) that take turns every 4 phrases, a chord a bar
  *   the bass        mono: SUB, ACID or REESE; its line KICK (a note on each kick, the old one), LONG (held roots,
  *                   slides, pushes), RAGGA (a riff that repeats and answers), ACID (16 steps, slides, accents)
  *   a rhythm layer  3 voices of organ: the skank family (A B C D) and the jazz family (J comping, hemiola,
  *                   pushes), a family 2 to 4 phrases at a time; stabs after a BUILD
  *   a pad           3 voices of strings, the filter moving over the phrase
+ * Each track renders into its own buffer, then the tracks are mixed with their mute (a 5 ms fade, or from the next
+ * phrase) and level: so a track can move to the second core, or to an effect, later.
  * Float, as the engine's clock code: the FM-1's FPU is single precision, no libm (fastmath.h), no 64-bit maths.
  * Everything runs in the audio interrupt; the controls are single words the main loop writes. */
 #include "music.h"
@@ -16,13 +19,48 @@
 #define SR 44100.0f
 
 /* ---------------------------------------------------------------- the controls --- */
-static volatile uint8_t c_level = MUSIC_OFF, c_bass_mode = MBASS_LONG, c_timbre = MTIMBRE_REESE, c_pool = MPOOL_MIX;
+static volatile uint8_t c_bass_mode = MBASS_LONG, c_timbre = MTIMBRE_REESE, c_harm = MHARM_MIX, c_hsound = MHSOUND_ORGAN;
+static volatile uint8_t c_stress;
 static volatile int8_t c_root = -1;
-void music_level(unsigned level) { if (level < MUSIC_LEVELS) c_level = (uint8_t)level; }
+static volatile uint8_t want[TRACKS] = { 0, 1, 1, 1 }, want_q[TRACKS];   /* muted: as asked (main loop) */
+static volatile uint8_t heard_muted[TRACKS] = { 0, 1, 1, 1 };            /* as it sounds (audio) */
+static volatile float lvl[TRACKS] = { 1.0f, 1.0f, 1.0f, 1.0f };
+static volatile float bass_cut = 1.0f, bass_k = 1.0f, bass_slide = 0.0009f;   /* K2..K4 of the bass */
+static volatile float h_bright = 1.0f, h_move = 1.0f, h_decay = 1.0f;         /* K2..K4 of the harmony */
+static volatile uint8_t h_retime;
+static float ms_coef(float ms);
+static float knob_mul(unsigned v) { return fm_exp2f(((float)v - 64.0f) * (1.0f / 32.0f)); }   /* 0.25 .. 1 .. 4 */
+void music_mute(unsigned t, int muted, int at_phrase)
+{
+    if (t >= TRACKS) return;
+    want_q[t] = (uint8_t)(at_phrase && jungle_playing());
+    want[t] = (uint8_t)!!muted;
+}
+int music_muted(unsigned t) { return t < TRACKS && heard_muted[t]; }
+int music_mute_pending(unsigned t) { return t < TRACKS && want[t] != heard_muted[t]; }
+void music_track_level(unsigned t, unsigned v)
+{
+    float g = (float)v * (1.0f / 100.0f);
+    if (t < TRACKS) lvl[t] = g * g;
+}
+void music_param(unsigned t, unsigned k, unsigned v)
+{
+    if (t == TRK_BASS) {
+        if (k == 0) bass_cut = knob_mul(v);
+        else if (k == 1) bass_k = 2.0f - (float)v * (1.9f / 127.0f);          /* 64: as built; up: more resonance */
+        else if (k == 2) bass_slide = ms_coef(4.0f + (float)v * ((float)v * 0.006f)); /* slide 4 .. 100 ms; 64: ~28 ms */
+    } else if (t == TRK_HARMONY) {
+        if (k == 0) h_bright = knob_mul(v);
+        else if (k == 1) h_move = (float)v * (1.0f / 64.0f);
+        else if (k == 2) { h_decay = knob_mul(v); h_retime = 1; }
+    }
+}
 void music_bass_mode(unsigned mode) { if (mode < MBASS_MODES) c_bass_mode = (uint8_t)mode; }
 void music_bass_timbre(unsigned timbre) { if (timbre < MTIMBRES) c_timbre = (uint8_t)timbre; }
-void music_pool(unsigned pool) { if (pool < MPOOLS) c_pool = (uint8_t)pool; }
+void music_harm_mode(unsigned mode) { if (mode < MHARM_MODES) c_harm = (uint8_t)mode; }
+void music_harm_sound(unsigned sound) { if (sound < MHSOUNDS) c_hsound = (uint8_t)sound; }
 void music_root(unsigned pc) { c_root = (int8_t)(pc % 12u); }
+void music_stress(int on) { c_stress = (uint8_t)!!on; }
 
 /* ------------------------------------------------------------- small pieces --- */
 static uint32_t rng = 0x2545f491u;
@@ -80,7 +118,7 @@ static void bass_play(int midi, float gate_samples, int slide, int accent)
 {
     bass.target = mtof((float)midi);
     if (slide && bass.on && bass.gate_left > 0) {        /* a slide: no new attack, the pitch glides there */
-        bass.glide = 0.0009f;
+        bass.glide = bass_slide;
         bass.gate_left = gate_samples;
         if (accent) bass.fenv = 0.8f;
         return;
@@ -109,7 +147,7 @@ static float bass_render(void)
         break;
     }
     float cut = bass.mode == MTIMBRE_ACID ? 220.0f + 3200.0f * bass.fenv * bass.acc * bass.acc : 140.0f + 700.0f * bass.fenv;
-    s = svf_lp(&bass.f, s, g_of(cut), bass.mode == MTIMBRE_ACID ? 0.35f : 1.2f);
+    s = svf_lp(&bass.f, s, g_of(cut * bass_cut), (bass.mode == MTIMBRE_ACID ? 0.35f : 1.2f) * bass_k);
     bass.fenv *= bass.mode == MTIMBRE_ACID ? 0.9993f : 0.9996f;
     if (bass.gate_left > 0) bass.gate_left -= 1.0f;
     else bass.env *= bass.mode == MTIMBRE_ACID ? 0.9975f : bass.mode == MTIMBRE_SUB ? 0.9985f : 0.9992f;
@@ -122,14 +160,19 @@ enum { T_STRINGS, T_ORGAN, T_STAB };
 struct voice { float ph[4], freq, env, fenv, vel; int stage, gate; struct svf f; };
 struct layer {
     struct voice v[3]; int voicing[3], lo, hi;
-    int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0;
+    int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0, dec0, rel0;
 };
 static struct layer pad, rhy;
 static void layer_shape(struct layer *L, int timbre, float atk, float dec, float sus, float rel,
                         float cut, float famt, float k, float gain)
 {
     L->timbre = timbre; L->sus = sus; L->cut = cut; L->famt = famt; L->k = k; L->gain = gain;
+    L->dec0 = dec; L->rel0 = rel;
     L->ca = ms_coef(atk); L->cd = ms_coef(dec); L->cr = ms_coef(rel);
+}
+static void layer_retime(struct layer *L, float mul)   /* the harmony's K4: its notes shorter or longer */
+{
+    L->cd = ms_coef(L->dec0 * mul); L->cr = ms_coef(L->rel0 * mul);
 }
 static void voice_lead(struct layer *L, const int pcs[3])   /* each voice: its chord tone's nearest octave */
 {
@@ -189,7 +232,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
             h->fenv *= 0.9985f;
         } else {
             s = 0.5f * (saw(&h->ph[0], inc * 1.0035f) + saw(&h->ph[1], inc * 0.9965f));
-            float g = L->timbre == T_STRINGS ? g_moving : g_of(L->cut + L->famt * h->fenv);
+            float g = L->timbre == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv) * h_bright);
             s = svf_lp(&h->f, s, g, L->k);
             h->fenv *= 0.9992f;
         }
@@ -317,8 +360,8 @@ static int pick_in(int fam)
 }
 static void rhythm_phrase(void)
 {
-    int pool = c_pool, fam = FAMILY[md];
-    if (pool < MPOOL_MIX) { fam = pool; build_was_on = 0; }
+    int hm = c_harm, pool = hm == MHARM_SKANK ? 0 : hm == MHARM_JAZZ ? 1 : 2, fam = FAMILY[md];
+    if (pool < 2) { fam = pool; build_was_on = 0; }
     else if (build_was_on) { md = MD_STABS; fam_left = 1; build_was_on = 0; goto set; }
     else if (fam == 2 || --fam_left <= 0) {                     /* a family stays 2 to 4 phrases */
         fam = fam == 2 ? (int)rnd(2) : (rnd(10) < 8 ? !fam : fam);
@@ -332,6 +375,10 @@ set:
         rhythm_set(R_SKANK); rhy.lo = 58; rhy.hi = 74; jz_kind = md - MD_JCOMP;
         layer_shape(&rhy, T_ORGAN, 3, 160, 0.55f, 45, 5000, 0, 1.4f, 0.26f);
     } else rhythm_set(md == MD_C ? R_BUBBLE : R_SKANK);
+    if (c_hsound == MHSOUND_SAW && md != MD_STABS) {   /* the same rhythm on detuned saws through a filter */
+        rhy.timbre = T_STAB; rhy.cut = 1100.0f; rhy.famt = 2600.0f; rhy.k = 0.9f; rhy.gain *= 0.8f;
+    }
+    layer_retime(&rhy, h_decay);
 }
 
 /* ------------------------------------------------------- the bass line --- */
@@ -449,7 +496,7 @@ void music_hit(unsigned slice, int pitch, unsigned frame)
     if (nev < NEV) { ev[nev].frame = (uint16_t)frame; ev[nev].type = EV_HIT; ev[nev].a = (uint8_t)slice; ev[nev].b = (int8_t)pitch; ++nev; }
 }
 
-static unsigned level, pad_on;
+static unsigned pad_on, rhythm_on, stress;
 static void on_step(int step, uint32_t at)
 {
     if (have_step) {   /* the tempo, from the steps themselves: right with a MIDI clock, a tempo change, halving */
@@ -459,11 +506,16 @@ static void on_step(int step, uint32_t at)
     have_step = 1;
     last_step_at = at;
     if (step == 0) {
+        int hm = c_harm;
+        for (int t = 0; t < TRACKS; ++t) if (want_q[t]) heard_muted[t] = want[t];   /* the mutes asked for the phrase */
         if (c_root >= 0 && c_root != key_root) { key_root = c_root; chord_ix = 3; }
         if (++phrase_count % 4 == 0) prog = prog == prog_epic ? prog_dub : prog_epic;
-        rhythm_phrase();
-        if (level >= MUSIC_FULL) pad_on = 1; else { pad_on = 0; layer_release(&pad); }
-        if (level == MUSIC_MAX) {   /* everything held: the CPU's worst case */
+        stress = c_stress;
+        rhythm_on = hm != MHARM_PAD;
+        if (rhythm_on) rhythm_phrase(); else layer_release(&rhy);
+        if (stress || hm == MHARM_PAD || hm == MHARM_MIX_PAD) pad_on = 1; else { pad_on = 0; layer_release(&pad); }
+        if (stress) {   /* everything held: the CPU's worst case */
+            rhythm_on = 0;
             rhythm_set(R_STABS); rhy.sus = 0.5f;
             layer_chord_of(&rhy, prog, (chord_ix + 1) % 4, TRIAD, 1, 0.6f, 0, 1);
         }
@@ -473,18 +525,16 @@ static void on_step(int step, uint32_t at)
         if (pad_on) layer_chord_of(&pad, prog, chord_ix, COLOUR, 0, 1.0f, 0, 1);
         if (step == 0) bass_plan();
     }
-    if (level >= MUSIC_BASS) bass_step(step);
+    bass_step(step);
     layer_step_gates(&rhy);
-    if (level >= MUSIC_RHYTHM && level != MUSIC_MAX) {
-        if (FAMILY[md] == 1) jazz_step(step); else skank_step(step);
-    }
+    if (rhythm_on) { if (FAMILY[md] == 1) jazz_step(step); else skank_step(step); }
     if (jungle_roll_active() == 1) build_was_on = 1;
 }
 static void on_hit(int slice, int pitch)
 {
     static const uint16_t kick_mask = (1u << 0) | (1u << 1) | (1u << 5) | (1u << 9) | (1u << 13);   /* Amen */
     (void)pitch;
-    if (level < MUSIC_BASS || bmode != MBASS_KICK || jungle_roll_active() == 1) return;
+    if (bmode != MBASS_KICK || jungle_roll_active() == 1) return;
     if (!(kick_mask >> slice & 1u)) return;
     int note = 36 + (key_root + prog[chord_ix][0]) % 12;
     if (note < 28) note += 12;
@@ -500,45 +550,64 @@ void music_init(void)
     pad.voicing[0] = rhy.voicing[0] = 60; pad.voicing[1] = rhy.voicing[1] = 64; pad.voicing[2] = rhy.voicing[2] = 67;
     rhythm_set(R_SKANK);
     bass.mode = MTIMBRE_REESE;
+    bass_slide = ms_coef(25.0f);
 }
 
-void music_render(int32_t *lr, unsigned n)
+enum { CHUNK = 256 };
+static float buf_bass[CHUNK], buf_harm[2 * CHUNK];
+static float gain[TRACKS] = { 1.0f, 0.0f, 0.0f, 0.0f };
+static void render_chunk(int32_t *lr, unsigned n)
 {
-    unsigned lv = c_level, e = 0;
-    if (lv != level) {
-        if (lv < MUSIC_BASS) bass.on = 0;
-        if (lv < MUSIC_RHYTHM || (level == MUSIC_MAX && lv != MUSIC_MAX)) { layer_release(&rhy); rhythm_set(md == MD_STABS ? R_STABS : R_SKANK); }
-        if (lv < MUSIC_FULL) { pad_on = 0; layer_release(&pad); }
-        level = lv;
+    unsigned e = 0;
+    float tgt[TRACKS];
+    for (int t = 0; t < TRACKS; ++t) {
+        if (!want_q[t]) heard_muted[t] = want[t];   /* a plain tap: now */
+        tgt[t] = (heard_muted[t] && !(c_stress && t != TRK_BREAK)) ? 0.0f : lvl[t];
     }
     bass.mode = c_timbre;
-    if (lv == MUSIC_OFF && !bass.on) {   /* off: only the conductor keeps time, so the music comes back in place */
-        for (; e < nev; ++e) if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + ev[e].frame);
-        nev = 0;
-        frame_base += n;
-        return;
-    }
+    if (h_retime) { h_retime = 0; layer_retime(&rhy, h_decay); }
     static float lfo_ph;
     lfo_ph += (float)n / (sps * 32.0f);
     if (lfo_ph >= 1.0f) lfo_ph -= 1.0f;
     float tri = lfo_ph < 0.5f ? 2.0f * lfo_ph : 2.0f - 2.0f * lfo_ph;
-    float g_pad = g_of(900.0f * (0.45f + 2.6f * tri * tri));
+    float g_pad = g_of(900.0f * h_bright * (0.45f + 2.6f * h_move * tri * tri));
+    /* the tracks, each in its own buffer (the events at their frames) */
     for (unsigned i = 0; i < n; ++i) {
         while (e < nev && ev[e].frame <= i) {
             if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + i); else on_hit(ev[e].a, ev[e].b);
             ++e;
         }
         pend_tick();
-        float l = 0.0f, r = 0.0f, b = bass_render() * 0.55f;
+        float l = 0.0f, r = 0.0f;
+        buf_bass[i] = bass_render() * 0.55f;
         layer_render(&pad, &l, &r, g_pad);
         layer_render(&rhy, &l, &r, g_pad);
-        /* the break peaks about half of full scale (jungle.c: mix << 7); the music beside it, softly limited */
-        float L = 0.75f * soft(1.2f * (b + l)), R = 0.75f * soft(1.2f * (b + r));
-        int32_t a = lr[2 * i] + (int32_t)(L * 8388607.0f), c = lr[2 * i + 1] + (int32_t)(R * 8388607.0f);
-        lr[2 * i] = a > 8388607 ? 8388607 : a < -8388607 ? -8388607 : a;          /* 24 bits: never wrap */
-        lr[2 * i + 1] = c > 8388607 ? 8388607 : c < -8388607 ? -8388607 : c;
+        buf_harm[2 * i] = l;
+        buf_harm[2 * i + 1] = r;
     }
     for (; e < nev; ++e) if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + n);
     nev = 0;
     frame_base += n;
+    /* the mix: each track's gain glides to its target in ~5 ms (no click); the break's own gain on what jungle.c made */
+    const float glide = 1.0f / 220.0f;
+    for (unsigned i = 0; i < n; ++i) {
+        for (int t = 0; t < TRACKS; ++t) {
+            float d = tgt[t] - gain[t];
+            gain[t] = d > glide ? gain[t] + glide : d < -glide ? gain[t] - glide : tgt[t];
+        }
+        float b = buf_bass[i] * gain[TRK_BASS];
+        float L = 0.75f * soft(1.2f * (b + buf_harm[2 * i] * gain[TRK_HARMONY]));
+        float R = 0.75f * soft(1.2f * (b + buf_harm[2 * i + 1] * gain[TRK_HARMONY]));
+        int32_t a = lr[2 * i], c = lr[2 * i + 1];
+        if (gain[TRK_BREAK] != 1.0f) { a = (int32_t)((float)a * gain[TRK_BREAK]); c = (int32_t)((float)c * gain[TRK_BREAK]); }
+        a += (int32_t)(L * 8388607.0f);
+        c += (int32_t)(R * 8388607.0f);
+        lr[2 * i] = a > 8388607 ? 8388607 : a < -8388607 ? -8388607 : a;          /* 24 bits: never wrap */
+        lr[2 * i + 1] = c > 8388607 ? 8388607 : c < -8388607 ? -8388607 : c;
+    }
+}
+void music_render(int32_t *lr, unsigned n)
+{
+    while (n > CHUNK) { render_chunk(lr, CHUNK); lr += 2 * CHUNK; n -= CHUNK; }   /* (the FM-1's block is 256) */
+    render_chunk(lr, n);
 }

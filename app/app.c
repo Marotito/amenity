@@ -18,7 +18,7 @@
  * Part of fm1-base's unity build, after the platform: gfx.c is in scope. */
 #include "jungle.h"
 #include "jungle_mul.h"
-#include "music.h"                      /* Amenity+ */
+#include "music.h"                      /* Facility: the tracks beside the break */
 
 /* ------------------------------------------------------------------ audio --- */
 /* What the render makes is heard one block later (the I2S buffer's other half): the engine works on that time, so
@@ -41,7 +41,7 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
     if (muted)
         return;
     jungle_render(lr, n, now_ticks() + HEARD_TICKS);
-    music_render(lr, n);                     /* Amenity+: bass, rhythm and pad beside the break */
+    music_render(lr, n);                     /* Facility: the break's mute and level, the tracks beside it */
     for (i = 0; i < 2u * n; i++)
         lr[i] = mul_shr(lr[i], (int32_t)master_q12, 12);
 }
@@ -89,7 +89,7 @@ void app_tick(void)
 }
 
 /* ------------------------------------------------------------------ state --- */
-enum { PAGE_MAIN, PAGE_EQ, PAGE_FX };
+enum { PAGE_MAIN, PAGE_EQ, PAGE_FX, PAGE_FACILITY };
 enum { Q_SWEEP = 14, Q_FLAT = 8 };       /* the DJ filter rings only while K4 turns */
 static struct {
     unsigned tempo, rhythm, filter, warp, feedback, root, lofi, saturation, compression, brk;
@@ -97,6 +97,21 @@ static struct {
     uint8_t playing, frozen, auto_roll, page, fx_used, external, filter_q;
     uint32_t filter_turned, filter_q_step, clock_near;
 } st = {.tempo = 1600, .filter = 64, .root = 4, .filter_q = Q_FLAT};
+
+/* Facility: four tracks, the break the first. The focus picks what ALGO (mode), PRESET (sound) and K1..K4 turn */
+static const char *const TRACK_NAME[TRACKS] = {"BREAK", "BASS", "HARMONY", "MELODY"};
+static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID"};
+static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE"};
+static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "PAD", "MIX+PAD"};
+static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW"};
+static struct {
+    uint8_t focus, stress;
+    uint8_t level[TRACKS];
+    uint8_t bass_mode, bass_sound, harm_mode, harm_sound;
+    uint8_t param[TRACKS][3];                /* K2..K4 of the bass and the harmony */
+} fac = {.focus = TRK_BASS, .level = {100, 100, 100, 100}, .bass_mode = MBASS_LONG, .bass_sound = MTIMBRE_REESE,
+         .harm_mode = MHARM_MIX, .harm_sound = MHSOUND_ORGAN,
+         .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 64, 64}}};
 
 static const uint8_t WHITE[16] = PLAT_WHITE_KEYS, BLACK[11] = PLAT_BLACK_KEYS;
 static const char *const ROLL_NAME[16] = {
@@ -186,6 +201,9 @@ void app_init(void)
 {
     jungle_init();
     music_init();
+    for (unsigned t = 0; t < TRACKS; t++)
+        for (unsigned k = 0; k < 3u; k++)
+            music_param(t, k, fac.param[t][k]);
     order_load();
     user_scan();
     select_break(0);
@@ -265,7 +283,12 @@ static void keys_input(uint32_t keys, uint32_t btn)
     }
 }
 
-static struct { unsigned level, bass, timbre, pool; } mus = { MUSIC_OFF, MBASS_LONG, MTIMBRE_REESE, MPOOL_MIX };
+static void mute_toggle(unsigned t, uint32_t btn)
+{
+    int quant = (int)(btn >> B_SEL & 1u), now_muted = music_mute_pending(t) ? !music_muted(t) : music_muted(t);
+    music_mute(t, !now_muted, quant);
+    app_say(TRACK_NAME[t], now_muted ? (quant ? "IN NEXT PHRASE" : "IN") : (quant ? "OUT NEXT PHRASE" : "OUT"));
+}
 
 static void buttons_input(uint32_t btn, uint32_t now)
 {
@@ -289,35 +312,30 @@ static void buttons_input(uint32_t btn, uint32_t now)
     }
     if (PRESSED(B_REC))
         jungle_freeze(st.frozen = !st.frozen);
-    /* Amenity+ (provisional, for the first tests): ARP the music's level, LFO the bass line, GLO the bass sound,
-     * SAVE the rhythm layer's pool */
+    /* Facility: ARP between the break's page and Facility's (with EDIT held: the CPU test, every voice held);
+     * LFO, GLO, SAVE mute the bass, the harmony, the melody on either page, HOME the break on Facility's: a tap at
+     * once, with SEL held from the next phrase (the 2 bars' end) */
     if (PRESSED(B_ARP)) {
-        static const char *const LV[MUSIC_LEVELS] = { "OFF", "BASS", "BASS + RHYTHM", "FULL (+ PAD)", "MAX (CPU TEST)" };
-        mus.level = (mus.level + 1u) % MUSIC_LEVELS;
-        music_level(mus.level);
-        app_say("MUSIC", LV[mus.level]);
+        if (btn >> B_EDIT & 1u) {
+            music_stress(fac.stress = !fac.stress);
+            app_say("CPU TEST", fac.stress ? "ON" : "OFF");
+        } else {
+            st.page = st.page == PAGE_FACILITY ? PAGE_MAIN : PAGE_FACILITY;
+            app_say(st.page == PAGE_FACILITY ? "FACILITY" : "AMENITY", "");
+        }
     }
-    if (PRESSED(B_LFO)) {
-        static const char *const BM[MBASS_MODES] = { "KICK", "LONG", "RAGGA", "ACID" };
-        mus.bass = (mus.bass + 1u) % MBASS_MODES;
-        music_bass_mode(mus.bass);
-        app_say("BASS LINE", BM[mus.bass]);
-    }
-    if (PRESSED(B_GLO)) {
-        static const char *const BT[MTIMBRES] = { "SUB", "ACID", "REESE" };
-        mus.timbre = (mus.timbre + 1u) % MTIMBRES;
-        music_bass_timbre(mus.timbre);
-        app_say("BASS SOUND", BT[mus.timbre]);
-    }
-    if (PRESSED(B_SAVE)) {
-        static const char *const PL[MPOOLS] = { "SKANK FAMILY", "JAZZ FAMILY", "MIXED" };
-        mus.pool = (mus.pool + 1u) % MPOOLS;
-        music_pool(mus.pool);
-        app_say("RHYTHM", PL[mus.pool]);
+    {
+        static const uint8_t MUTE_BTN[3] = {B_LFO, B_GLO, B_SAVE};
+        unsigned t;
+        for (t = 0; t < 3u; t++)
+            if (PRESSED(MUTE_BTN[t]))
+                mute_toggle(TRK_BASS + t, btn);
+        if (st.page == PAGE_FACILITY && PRESSED(B_HOME))
+            mute_toggle(TRK_BREAK, btn);
     }
     if (PRESSED(B_SEQ))
         jungle_auto_roll(st.auto_roll = !st.auto_roll);
-    if (PRESSED(B_HOME)) {                   /* the plain break: no variation or warp until K2 / K3 turn again */
+    if (PRESSED(B_HOME) && st.page != PAGE_FACILITY) {   /* the plain break: no variation or warp until K2 / K3 turn again */
         st.rhythm = st.warp = 0;
         st.page = PAGE_MAIN;
         jungle_variation(0);
@@ -348,7 +366,63 @@ static void buttons_input(uint32_t btn, uint32_t now)
         ui.redraw = 1;
 }
 
+
 static unsigned turn(unsigned v, int32_t detents) { return (unsigned)clamp((int32_t)v + 2 * detents, 0, 127); }
+static int wrap(int v, int d, int n) { v = (v + d) % n; return v < 0 ? v + n : v; }
+
+/* Facility's page: SELECT the focus, ALGO its mode, PRESET its sound, K1 its level; K2..K4 the break's variation,
+ * warp and filter (as on the break's page), or the bass's / the harmony's sound */
+static void facility_encoders(const int32_t *e, uint32_t now)
+{
+    unsigned f, k;
+    if (e[EN_SELECT]) {
+        fac.focus = (uint8_t)wrap(fac.focus, e[EN_SELECT] > 0 ? 1 : -1, TRACKS);
+        app_say("FOCUS", TRACK_NAME[fac.focus]);
+    }
+    f = fac.focus;
+    if (e[EN_ALGO]) {
+        if (f == TRK_BASS) {
+            music_bass_mode(fac.bass_mode = (uint8_t)wrap(fac.bass_mode, e[EN_ALGO] > 0 ? 1 : -1, MBASS_MODES));
+            app_say("BASS MODE", BASS_MODE[fac.bass_mode]);
+        } else if (f == TRK_HARMONY) {
+            music_harm_mode(fac.harm_mode = (uint8_t)wrap(fac.harm_mode, e[EN_ALGO] > 0 ? 1 : -1, MHARM_MODES));
+            app_say("HARMONY MODE", HARM_MODE[fac.harm_mode]);
+        }
+    }
+    if (e[EN_PRESET]) {
+        if (f == TRK_BASS) {
+            music_bass_timbre(fac.bass_sound = (uint8_t)wrap(fac.bass_sound, e[EN_PRESET] > 0 ? 1 : -1, MTIMBRES));
+            app_say("BASS SOUND", BASS_SOUND[fac.bass_sound]);
+        } else if (f == TRK_HARMONY) {
+            music_harm_sound(fac.harm_sound = (uint8_t)wrap(fac.harm_sound, e[EN_PRESET] > 0 ? 1 : -1, MHSOUNDS));
+            app_say("HARMONY SOUND", HARM_SOUND[fac.harm_sound]);
+        } else if (f == TRK_BREAK && breaks_count()) {
+            int n = (int)breaks_count();
+            select_break((unsigned)wrap((int)st.brk, e[EN_PRESET] > 0 ? 1 : -1, n));
+            app_say("BREAK", break_at(st.brk)->name);
+        }
+    }
+    if (e[EN_K1])
+        music_track_level(f, fac.level[f] = (uint8_t)clamp(fac.level[f] + 2 * e[EN_K1], 0, 127));
+    if (f == TRK_BREAK) {                    /* the break's knobs, as on its page */
+        if (e[EN_K2])
+            jungle_variation(st.rhythm = turn(st.rhythm, e[EN_K2]));
+        if (e[EN_K3])
+            jungle_warp(st.warp = turn(st.warp, e[EN_K3]));
+        if (e[EN_K4]) {
+            int next = (int)turn(st.filter, e[EN_K4]);
+            if (((int)st.filter < 64 && next > 64) || ((int)st.filter > 64 && next < 64))
+                next = 64;
+            jungle_filter(st.filter = (unsigned)next);
+            st.filter_turned = now;
+            if (st.filter_q != Q_SWEEP)
+                jungle_filter_resonance(st.filter_q = Q_SWEEP);
+        }
+    } else
+        for (k = 0; k < 3u; k++)
+            if (e[EN_K2 + k])
+                music_param(f, k, fac.param[f][k] = (uint8_t)turn(fac.param[f][k], e[EN_K2 + k]));
+}
 
 static void encoders_input(uint32_t btn, uint32_t now)
 {
@@ -356,6 +430,10 @@ static void encoders_input(uint32_t btn, uint32_t now)
     for (k = 0; k < NE; k++)
         if ((e[k] = plat_enc(k)) != 0)
             ui.redraw = 1;
+    if (st.page == PAGE_FACILITY) {
+        facility_encoders(e, now);
+        return;
+    }
     if (e[EN_SELECT] && !st.external)        /* SELECT: the tempo, 1 BPM a detent (2 turned fast), 0.1 with SEL */
         set_tempo((int)st.tempo + e[EN_SELECT] * ((btn >> B_SEL & 1u) ? 1 : e[EN_SELECT] > 2 || e[EN_SELECT] < -2 ? 20 : 10));
     if (e[EN_PRESET] && breaks_count()) {        /* PRESET: the next or the previous break, round */
@@ -440,6 +518,18 @@ static void lights(void)
         btn |= 1u << B_FX;
     if (st.page == PAGE_EQ)
         btn |= 1u << B_ENV;
+    if (st.page == PAGE_FACILITY)
+        btn |= 1u << B_ARP;
+    {                                        /* Facility: a track's button lit while it sounds, blinking while it waits */
+        static const uint8_t MUTE_BTN[TRACKS] = {B_HOME, B_LFO, B_GLO, B_SAVE};
+        unsigned t, blink = plat_ms() / 150u & 1u;
+        for (t = 0; t < TRACKS; t++) {
+            if (t == TRK_BREAK && st.page != PAGE_FACILITY)
+                continue;
+            if (music_mute_pending(t) ? blink : !music_muted(t))
+                btn |= 1u << MUTE_BTN[t];
+        }
+    }
     if (step >= 0)
         keys |= 1u << WHITE[(unsigned)step / 2u];
     if (slice >= 0) {
@@ -542,6 +632,72 @@ static void state_name(const char *name, const char *more, uint32_t now)
     }
 }
 
+/* Facility's page: the four tracks where the pattern is (a row each: the focus marked, the name, the mode and the
+ * sound, the level, ON / OFF, amber while a mute waits for the phrase's end), and the focus's knobs below */
+static void facility_tracks(uint32_t now)
+{
+    unsigned t;
+    (void)now;
+    for (t = 0; t < TRACKS; t++) {
+        int32_t y = (int32_t)t * 19;
+        int muted = music_muted(t), wait = music_mute_pending(t);
+        uint16_t c = wait ? C_ORANGE : muted ? C_GRAY : C_WHITE;
+        char what[24];
+        what[0] = 0;
+        if (t == TRK_BREAK) {
+            const struct jungle_break *b = break_at(st.brk);
+            text_cat(what, b ? b->name : "NO BREAK");
+        } else if (t == TRK_BASS) {
+            text_cat(what, BASS_MODE[fac.bass_mode]);
+            text_cat(what, " / ");
+            text_cat(what, BASS_SOUND[fac.bass_sound]);
+        } else if (t == TRK_HARMONY) {
+            text_cat(what, HARM_MODE[fac.harm_mode]);
+            text_cat(what, " / ");
+            text_cat(what, HARM_SOUND[fac.harm_sound]);
+        } else
+            text_cat(what, "(TO COME)");
+        if (t == fac.focus)
+            cv_rect(0, y, 240, 18, RGB(20, 60, 75));
+        cv_rect(0, y, 3, 18, t == fac.focus ? C_CYAN : C_BLACK);
+        {
+            char num[2] = {(char)('1' + t), 0};
+            cv_text(7, y + 1, &FONT_S, num, C_CYAN);
+        }
+        cv_text(20, y + 1, &FONT_S, TRACK_NAME[t], c);
+        cv_text(92, y + 3, &FONT_XS, what, muted && !wait ? C_GRAY : C_HI);
+        cv_rect(184, y + 8, 22, 3, C_LINE);
+        cv_rect(184, y + 8, fac.level[t] * 22 / 127, 3, muted ? C_GRAY : C_CYAN);
+        cv_text(210, y + 3, &FONT_XS, wait ? "WAIT" : muted ? "OFF" : "ON", wait ? C_ORANGE : muted ? C_GRAY : C_GREEN);
+    }
+}
+static void facility_knobs(void)
+{
+    char t[16];
+    unsigned f = fac.focus;
+    int_text(fac.level[f], t);
+    value(6, 46, "LEVEL", t, fac.level[f], 0);
+    if (f == TRK_BREAK) {
+        int_text((int32_t)st.rhythm, t);
+        value(64, 46, "VARIATION", t, st.rhythm, 0);
+        int_text((int32_t)st.warp, t);
+        value(122, 46, "WARP", t, st.warp, 0);
+        if (st.filter == 64)
+            t[0] = 0, text_cat(t, "OFF");
+        else
+            int_text((int32_t)st.filter - 64, t);
+        value(180, 46, "FILTER", t, st.filter, 1);
+    } else if (f == TRK_BASS || f == TRK_HARMONY) {
+        static const char *const LBL[2][3] = {{"CUTOFF", "RESO", "SLIDE"}, {"BRIGHT", "MOVEMENT", "DECAY"}};
+        unsigned k;
+        for (k = 0; k < 3u; k++) {
+            int_text((int32_t)fac.param[f][k] - 64, t);
+            value(64 + (int32_t)k * 58, 46, LBL[f == TRK_HARMONY][k], t, fac.param[f][k], 1);
+        }
+    } else
+        cv_text(64, 59, &FONT_XS, "THE MELODY COMES IN PHASE 4", C_GRAY);
+}
+
 static void draw(void)
 {
     char t[24];
@@ -580,7 +736,9 @@ static void draw(void)
      * the filter closes, feedback gives every hit an echo, LO-FI lays scan lines over it, an octave down sinks it */
     jungle_pattern(pat);
     cv_begin(240, 76, bg);
-    {
+    if (st.page == PAGE_FACILITY)
+        facility_tracks(now);
+    else {
         unsigned fx = jungle_instant_active();
         uint32_t ripple = ui.flip_t && now - ui.flip_t < ANIM_MS ? (now - ui.flip_t) * 24u / ANIM_MS + 1u : 0u;
         int shake = ui.glitch_t && now - ui.glitch_t < ANIM_MS ? ((now / 33u) & 1u ? 3 : -3) : 0;
@@ -634,6 +792,7 @@ static void draw(void)
                 cv_rect(0, (int32_t)i, 240, 1, bg);
     }
     cv_blit(0, 38);
+    (void)step;
     /* what is happening, the modes, the knobs of the page */
     cv_begin(240, 126, bg);
     if (roll >= 0)
@@ -662,7 +821,9 @@ static void draw(void)
             cv_text(x, 28, &FONT_XS, t, C_WHITE);
         }
     }
-    if (st.page == PAGE_EQ) {
+    if (st.page == PAGE_FACILITY)
+        facility_knobs();
+    else if (st.page == PAGE_EQ) {
         static const char *const BAND[4] = {"LOW", "LO-MID", "HI-MID", "HIGH"};
         for (i = 0; i < 4u; i++) {
             t[0] = 0;
@@ -726,10 +887,11 @@ static void draw(void)
         text_cat(t, "BIT");
         cv_text(6, 104, &FONT_XS, t, C_ORANGE);
     }
-    cv_text(234 - text_w(&FONT_XS, st.page == PAGE_EQ ? "EQ: ENV = BACK" : st.page == PAGE_FX ? "FX: FX = BACK" :
-                                                                                               "HOLD WHITE = ROLL"),
-            104, &FONT_XS,
-            st.page == PAGE_EQ ? "EQ: ENV = BACK" : st.page == PAGE_FX ? "FX: FX = BACK" : "HOLD WHITE = ROLL", C_GRAY);
+    {
+        const char *hint = st.page == PAGE_EQ ? "EQ: ENV = BACK" : st.page == PAGE_FX ? "FX: FX = BACK" :
+                           st.page == PAGE_FACILITY ? "SELECT = FOCUS  ARP = BACK" : "HOLD WHITE = ROLL";
+        cv_text(234 - text_w(&FONT_XS, hint), 104, &FONT_XS, hint, C_GRAY);
+    }
     cv_blit(0, 114);
 }
 

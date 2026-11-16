@@ -1,0 +1,61 @@
+# Facility: ARP to its page and back; LFO / GLO / SAVE mute the bass, the harmony, the melody on either page, HOME the
+# break on Facility's; with SEL held a mute waits for the phrase's end (its button blinks, the row says WAIT).
+# SELECT moves the focus, ALGO its mode, PRESET its sound, K1 its level, K2..K4 its sound's knobs. EDIT + ARP: the
+# CPU test (every voice held, every track heard), and the output never clips.
+#   sh build.sh --host && app/build/host/amenity_host app/tests/facility.txt build/facility
+wait 900
+master 4096
+spin SELECT 10
+spin K2 18
+tap PLAY
+wait 2000
+wav facility.wav
+tap LFO
+wait 6000
+tap ARP
+wait 300
+shot 01-facility.png
+leds
+press SEL
+tap GLO
+release SEL
+wait 200
+shot 02-harmony-waits.png
+wait 3000
+shot 03-harmony-in.png
+spin ALGO 2
+spin PRESET 1
+wait 6000
+spin SELECT 1
+spin K2 -10
+spin K4 20
+wait 300
+shot 04-bass-focus.png
+spin SELECT -1
+wait 4000
+tap HOME
+wait 3000
+tap HOME
+wait 3000
+tap ARP
+wait 300
+shot 05-amenity.png
+tap LFO
+wait 3000
+tap GLO
+wait 1000
+peakreset
+press EDIT
+tap ARP
+release EDIT
+key w2 down
+key b8 down
+wait 6000
+expect peak_db_max <0
+key w2 up
+key b8 up
+press EDIT
+tap ARP
+release EDIT
+wait 2000
+wavstop
