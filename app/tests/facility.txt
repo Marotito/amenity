@@ -58,4 +58,14 @@ press EDIT
 tap GLO
 release EDIT
 wait 2000
+
+# STOP: the pad and every held note let go (Marote, 17 nov: the pad kept sounding after stop)
+tap SAVE
+tap ARP
+wait 4000
+tap PLAY
+wait 1500
+peakreset
+wait 2000
+expect peak_db_max <-60
 wavstop

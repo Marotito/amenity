@@ -855,6 +855,20 @@ static void render_chunk(int32_t *lr, unsigned n)
         tgt[t] = c_stress && t != TRK_BREAK ? lvl[t] : (heard_muted[t] || dub_drop[t]) ? 0.0f : lvl[t];
     }
     bass.mode = bass_sound_now;
+    {   /* the transport stopped: every held note lets go (the pad's, the rhythm layer's, the bass's), nothing waits */
+        static int was_playing;
+        int playing = jungle_playing();
+        if (was_playing && !playing) {   /* quickly: a 120 ms release, not the pad's 600 */
+            pad.cr = rhy.cr = ms_coef(120.0f);
+            layer_release(&pad);
+            layer_release(&rhy);
+            bass.gate_left = 0.0f;
+            for (int i = 0; i < 8; ++i) pend[i].live = 0;
+            second_wait[TRK_BASS] = second_wait[TRK_HARMONY] = 0.0f;
+        }
+        if (!was_playing && playing) { layer_retime(&pad, 1.0f); layer_retime(&rhy, h_decay); }   /* their own again */
+        was_playing = playing;
+    }
     if (h_retime) { h_retime = 0; layer_retime(&rhy, h_decay); }
     static float lfo_ph;
     lfo_ph += (float)n / (sps * 32.0f);
