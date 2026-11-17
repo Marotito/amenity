@@ -312,20 +312,20 @@ static void buttons_input(uint32_t btn, uint32_t now)
     }
     if (PRESSED(B_REC))
         jungle_freeze(st.frozen = !st.frozen);
-    /* Facility: ARP between the break's page and Facility's (with EDIT held: the CPU test, every voice held);
-     * LFO, GLO, SAVE mute the bass, the harmony, the melody on either page, HOME the break on Facility's: a tap at
+    /* Facility: GLO between the break's page and Facility's (with EDIT held: the CPU test, every voice held);
+     * LFO, ARP, SAVE mute the bass, the harmony, the melody on either page, HOME the break on Facility's: a tap at
      * once, with SEL held from the next phrase (the 2 bars' end) */
-    if (PRESSED(B_ARP)) {
+    if (PRESSED(B_GLO)) {
         if (btn >> B_EDIT & 1u) {
             music_stress(fac.stress = !fac.stress);
             app_say("CPU TEST", fac.stress ? "ON" : "OFF");
         } else {
-            st.page = st.page == PAGE_FACILITY ? PAGE_MAIN : PAGE_FACILITY;
-            app_say(st.page == PAGE_FACILITY ? "FACILITY" : "AMENITY", "");
+            st.page = st.page == PAGE_FACILITY ? PAGE_MAIN : PAGE_FACILITY;   /* the header says which (red: FACILITY) */
+            ui.msg_until = 0;
         }
     }
     {
-        static const uint8_t MUTE_BTN[3] = {B_LFO, B_GLO, B_SAVE};
+        static const uint8_t MUTE_BTN[3] = {B_LFO, B_ARP, B_SAVE};
         unsigned t;
         for (t = 0; t < 3u; t++)
             if (PRESSED(MUTE_BTN[t]))
@@ -519,9 +519,9 @@ static void lights(void)
     if (st.page == PAGE_EQ)
         btn |= 1u << B_ENV;
     if (st.page == PAGE_FACILITY)
-        btn |= 1u << B_ARP;
+        btn |= 1u << B_GLO;
     {                                        /* Facility: a track's button lit while it sounds, blinking while it waits */
-        static const uint8_t MUTE_BTN[TRACKS] = {B_HOME, B_LFO, B_GLO, B_SAVE};
+        static const uint8_t MUTE_BTN[TRACKS] = {B_HOME, B_LFO, B_ARP, B_SAVE};
         unsigned t, blink = plat_ms() / 150u & 1u;
         for (t = 0; t < TRACKS; t++) {
             if (t == TRK_BREAK && st.page != PAGE_FACILITY)
@@ -709,11 +709,16 @@ static void draw(void)
     uint32_t glow_p = ui.spark_t && now - ui.spark_t < ANIM_MS ? (now - ui.spark_t) * 256u / ANIM_MS : 256u;
     uint16_t bg = glow_p < 256u ? fade(ui.spark_c, (256u - glow_p) * ui.spark_lv / 256u) : C_BLACK;
     cv_begin(240, 38, bg);                   /* (down to the grid: no black seam between them) */
-    if (now < ui.msg_until) {
+    if (now < ui.msg_until && st.page == PAGE_FACILITY) {   /* FACILITY stays; the message on the right, small */
+        cv_text(6, 2, &FONT_M, "FACILITY", C_RED);
+        cv_text(234 - text_w(&FONT_XS, ui.msg[0]), 2, &FONT_XS, ui.msg[0], C_GRAY);
+        cv_text(234 - text_w(&FONT_S, ui.msg[1]), 17, &FONT_S, ui.msg[1], C_CYAN);
+    } else if (now < ui.msg_until) {
         int32_t x = cv_text(6, 6, &FONT_B, ui.msg[0], C_WHITE);
         cv_text(x + 8, 6, &FONT_B, ui.msg[1], C_CYAN);
     } else {
-        int32_t x = cv_text(6, 2, &FONT_M, APP_NAME, C_CYAN);
+        int32_t x = st.page == PAGE_FACILITY ? cv_text(6, 2, &FONT_M, "FACILITY", C_RED)   /* Facility's page */
+                                             : cv_text(6, 2, &FONT_M, APP_NAME, C_CYAN);
         if (st.external)
             cv_text(x + 6, 4, &FONT_XS, "EXT", C_GREEN);
         if (FM1B_BLE)
@@ -889,7 +894,7 @@ static void draw(void)
     }
     {
         const char *hint = st.page == PAGE_EQ ? "EQ: ENV = BACK" : st.page == PAGE_FX ? "FX: FX = BACK" :
-                           st.page == PAGE_FACILITY ? "SELECT = FOCUS  ARP = BACK" : "HOLD WHITE = ROLL";
+                           st.page == PAGE_FACILITY ? "SELECT = FOCUS  GLO = BACK" : "HOLD WHITE = ROLL";
         cv_text(234 - text_w(&FONT_XS, hint), 104, &FONT_XS, hint, C_GRAY);
     }
     cv_blit(0, 114);
