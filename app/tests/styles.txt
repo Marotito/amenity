@@ -1,0 +1,73 @@
+# Facility F2a: the BASE's five styles (ALGO on BASE), a progression held (PRESET), a track in a style of its own
+# (SEL + ALGO), the energy and AUTO DUB; the bass and the harmony heard throughout, nothing clips.
+#   sh build.sh --host && app/build/host/amenity_host app/tests/styles.txt build/styles
+wait 900
+master 4096
+spin SELECT 10
+spin K2 18
+tap PLAY
+wait 1500
+tap SAVE
+tap ARP
+tap GLO
+spin SELECT -1
+wait 50
+spin SELECT -1
+wait 300
+shot 01-base.png
+wav styles.wav
+wait 12000
+spin ALGO 1
+wait 300
+shot 02-jazz.png
+wait 14000
+spin ALGO 1
+wait 300
+shot 03-acid.png
+wait 12000
+spin ALGO 1
+wait 300
+shot 04-hiphop.png
+wait 12000
+spin ALGO 1
+spin K3 40
+wait 300
+shot 05-dub.png
+wait 14000
+spin ALGO 1
+spin K3 -40
+spin PRESET 1
+wait 50
+spin PRESET 1
+wait 50
+spin PRESET 1
+wait 50
+spin PRESET 1
+wait 300
+shot 06-breakcore-baroque.png
+wait 10000
+spin SELECT 1
+wait 50
+spin SELECT 1
+press SEL
+wait 50
+spin ALGO 1
+wait 50
+spin ALGO 1
+wait 50
+spin ALGO 1
+wait 50
+spin ALGO 1
+wait 50
+spin ALGO 1
+release SEL
+wait 300
+shot 07-bass-dub.png
+wait 12000
+spin SELECT -1
+wait 50
+spin SELECT -1
+spin K1 30
+wait 8000
+expect peak_db_max <0
+wavstop

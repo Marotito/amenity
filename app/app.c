@@ -98,20 +98,34 @@ static struct {
     uint32_t filter_turned, filter_q_step, clock_near;
 } st = {.tempo = 1600, .filter = 64, .root = 4, .filter_q = Q_FLAT};
 
-/* Facility: four tracks, the break the first. The focus picks what ALGO (mode), PRESET (sound) and K1..K4 turn */
+/* Facility: the BASE (the style, its progression) and four tracks, the break the first. The focus picks what
+ * ALGO (style or mode), PRESET (progression or sound) and K1..K4 turn; SEL + ALGO a track's own style */
+enum { FOC_BASE, FOCUSES = TRACKS + 1 };
 static const char *const TRACK_NAME[TRACKS] = {"BREAK", "BASS", "HARMONY", "MELODY"};
-static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID"};
+static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID", "WALK", "1 DROP", "RIFF"};
 static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE"};
-static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "PAD", "MIX+PAD"};
+static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "STABS", "PAD", "MIX+PAD"};
 static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW"};
+static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB"};
 static struct {
     uint8_t focus, stress;
     uint8_t level[TRACKS];
-    uint8_t bass_mode, bass_sound, harm_mode, harm_sound;
+    uint8_t style, prog, energy, chords, autodub;     /* the BASE (prog: MAUTO or 0..3) */
+    uint8_t tstyle[TRACKS];                          /* MSTYLE_BASE or a style */
+    uint8_t bass_mode, bass_sound, harm_mode, harm_sound;   /* MAUTO or one */
     uint8_t param[TRACKS][3];                /* K2..K4 of the bass and the harmony */
-} fac = {.focus = TRK_BASS, .level = {100, 100, 100, 100}, .bass_mode = MBASS_LONG, .bass_sound = MTIMBRE_REESE,
-         .harm_mode = MHARM_MIX, .harm_sound = MHSOUND_ORGAN,
+} fac = {.focus = 1 + TRK_BASS, .level = {100, 100, 100, 100}, .style = MSTYLE_BREAKCORE, .prog = MAUTO,
+         .energy = 64, .chords = 64, .autodub = 0,
+         .tstyle = {MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE},
+         .bass_mode = MAUTO, .bass_sound = MAUTO, .harm_mode = MAUTO, .harm_sound = MAUTO,
          .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 64, 64}}};
+/* a choice with AUTO first: MAUTO, 0, 1 .. n-1, turned d */
+static uint8_t auto_turn(uint8_t v, int32_t d, unsigned n)
+{
+    int i = v == MAUTO ? 0 : v + 1;
+    i = (i + (d > 0 ? 1 : -1) + (int)n + 1) % ((int)n + 1);
+    return (uint8_t)(i == 0 ? (int)MAUTO : i - 1);
+}
 
 static const uint8_t WHITE[16] = PLAT_WHITE_KEYS, BLACK[11] = PLAT_BLACK_KEYS;
 static const char *const ROLL_NAME[16] = {
@@ -370,30 +384,53 @@ static int wrap(int v, int d, int n) { v = (v + d) % n; return v < 0 ? v + n : v
 
 /* Facility's page: SELECT the focus, ALGO its mode, PRESET its sound, K1 its level; K2..K4 the break's variation,
  * warp and filter (as on the break's page), or the bass's / the harmony's sound */
-static void facility_encoders(const int32_t *e, uint32_t now)
+static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
 {
-    unsigned f, k;
+    unsigned k;
+    int f, sel = (int)(btn >> B_SEL & 1u);
     if (e[EN_SELECT]) {
-        fac.focus = (uint8_t)wrap(fac.focus, e[EN_SELECT] > 0 ? 1 : -1, TRACKS);
-        app_say("FOCUS", TRACK_NAME[fac.focus]);
+        fac.focus = (uint8_t)wrap(fac.focus, e[EN_SELECT] > 0 ? 1 : -1, FOCUSES);
+        app_say("FOCUS", fac.focus == FOC_BASE ? "BASE" : TRACK_NAME[fac.focus - 1]);
     }
-    f = fac.focus;
-    if (e[EN_ALGO]) {
+    if (fac.focus == FOC_BASE) {             /* the BASE: ALGO the style, PRESET the progression, K1..K3 */
+        if (e[EN_ALGO]) {
+            music_style(fac.style = (uint8_t)wrap(fac.style, e[EN_ALGO] > 0 ? 1 : -1, MSTYLES));
+            app_say("STYLE", music_style_name(fac.style));
+        }
+        if (e[EN_PRESET]) {
+            music_prog(fac.prog = auto_turn(fac.prog, e[EN_PRESET], 4));
+            app_say("PROGRESSION", fac.prog == MAUTO ? "AUTO" : music_prog_name(fac.style, fac.prog));
+        }
+        if (e[EN_K1])
+            music_energy(fac.energy = (uint8_t)turn(fac.energy, e[EN_K1]));
+        if (e[EN_K2])
+            music_chord_speed(fac.chords = (uint8_t)turn(fac.chords, e[EN_K2]));
+        if (e[EN_K3])
+            music_autodub(fac.autodub = (uint8_t)turn(fac.autodub, e[EN_K3]));
+        return;
+    }
+    f = fac.focus - 1;
+    if (e[EN_ALGO] && sel && f != TRK_BREAK) {   /* SEL + ALGO: the track's own style */
+        uint8_t ts = fac.tstyle[f];
+        ts = auto_turn(ts, e[EN_ALGO], MSTYLES);  /* (MSTYLE_BASE == MAUTO: BASE first) */
+        music_track_style((unsigned)f, fac.tstyle[f] = ts);
+        app_say("TRACK STYLE", ts == MSTYLE_BASE ? "= BASE" : music_style_name(ts));
+    } else if (e[EN_ALGO]) {
         if (f == TRK_BASS) {
-            music_bass_mode(fac.bass_mode = (uint8_t)wrap(fac.bass_mode, e[EN_ALGO] > 0 ? 1 : -1, MBASS_MODES));
-            app_say("BASS MODE", BASS_MODE[fac.bass_mode]);
+            music_bass_mode(fac.bass_mode = auto_turn(fac.bass_mode, e[EN_ALGO], MBASS_MODES));
+            app_say("BASS MODE", fac.bass_mode == MAUTO ? "AUTO" : BASS_MODE[fac.bass_mode]);
         } else if (f == TRK_HARMONY) {
-            music_harm_mode(fac.harm_mode = (uint8_t)wrap(fac.harm_mode, e[EN_ALGO] > 0 ? 1 : -1, MHARM_MODES));
-            app_say("HARMONY MODE", HARM_MODE[fac.harm_mode]);
+            music_harm_mode(fac.harm_mode = auto_turn(fac.harm_mode, e[EN_ALGO], MHARM_MODES));
+            app_say("HARMONY MODE", fac.harm_mode == MAUTO ? "AUTO" : HARM_MODE[fac.harm_mode]);
         }
     }
     if (e[EN_PRESET]) {
         if (f == TRK_BASS) {
-            music_bass_timbre(fac.bass_sound = (uint8_t)wrap(fac.bass_sound, e[EN_PRESET] > 0 ? 1 : -1, MTIMBRES));
-            app_say("BASS SOUND", BASS_SOUND[fac.bass_sound]);
+            music_bass_timbre(fac.bass_sound = auto_turn(fac.bass_sound, e[EN_PRESET], MTIMBRES));
+            app_say("BASS SOUND", fac.bass_sound == MAUTO ? "AUTO" : BASS_SOUND[fac.bass_sound]);
         } else if (f == TRK_HARMONY) {
-            music_harm_sound(fac.harm_sound = (uint8_t)wrap(fac.harm_sound, e[EN_PRESET] > 0 ? 1 : -1, MHSOUNDS));
-            app_say("HARMONY SOUND", HARM_SOUND[fac.harm_sound]);
+            music_harm_sound(fac.harm_sound = auto_turn(fac.harm_sound, e[EN_PRESET], MHSOUNDS));
+            app_say("HARMONY SOUND", fac.harm_sound == MAUTO ? "AUTO" : HARM_SOUND[fac.harm_sound]);
         } else if (f == TRK_BREAK && breaks_count()) {
             int n = (int)breaks_count();
             select_break((unsigned)wrap((int)st.brk, e[EN_PRESET] > 0 ? 1 : -1, n));
@@ -401,7 +438,7 @@ static void facility_encoders(const int32_t *e, uint32_t now)
         }
     }
     if (e[EN_K1])
-        music_track_level(f, fac.level[f] = (uint8_t)clamp(fac.level[f] + 2 * e[EN_K1], 0, 127));
+        music_track_level((unsigned)f, fac.level[f] = (uint8_t)clamp(fac.level[f] + 2 * e[EN_K1], 0, 127));
     if (f == TRK_BREAK) {                    /* the break's knobs, as on its page */
         if (e[EN_K2])
             jungle_variation(st.rhythm = turn(st.rhythm, e[EN_K2]));
@@ -419,7 +456,7 @@ static void facility_encoders(const int32_t *e, uint32_t now)
     } else
         for (k = 0; k < 3u; k++)
             if (e[EN_K2 + k])
-                music_param(f, k, fac.param[f][k] = (uint8_t)turn(fac.param[f][k], e[EN_K2 + k]));
+                music_param((unsigned)f, k, fac.param[f][k] = (uint8_t)turn(fac.param[f][k], e[EN_K2 + k]));
 }
 
 static void encoders_input(uint32_t btn, uint32_t now)
@@ -429,7 +466,7 @@ static void encoders_input(uint32_t btn, uint32_t now)
         if ((e[k] = plat_enc(k)) != 0)
             ui.redraw = 1;
     if (st.page == PAGE_FACILITY) {
-        facility_encoders(e, now);
+        facility_encoders(e, now, btn);
         return;
     }
     if (e[EN_SELECT] && !st.external)        /* SELECT: the tempo, 1 BPM a detent (2 turned fast), 0.1 with SEL */
@@ -633,44 +670,92 @@ static void state_name(const char *name, const char *more, uint32_t now)
 static void facility_tracks(uint32_t now)
 {
     unsigned t;
+    struct music_view mv;
     (void)now;
+    music_view(&mv);
     for (t = 0; t < TRACKS; t++) {
         int32_t y = (int32_t)t * 19;
-        int muted = music_muted(t), wait = music_mute_pending(t);
+        int muted = music_muted(t), wait = music_mute_pending(t), focused = fac.focus == t + 1u;
         uint16_t c = wait ? C_ORANGE : muted ? C_GRAY : C_WHITE;
-        char what[24];
+        char what[32];
         what[0] = 0;
+        if (t != TRK_BREAK && fac.tstyle[t] != MSTYLE_BASE) {   /* a style of its own */
+            text_cat(what, STYLE_ABBR[fac.tstyle[t]]);
+            text_cat(what, " ");
+        }
         if (t == TRK_BREAK) {
             const struct jungle_break *b = break_at(st.brk);
             text_cat(what, b ? b->name : "NO BREAK");
         } else if (t == TRK_BASS) {
-            text_cat(what, BASS_MODE[fac.bass_mode]);
-            text_cat(what, " / ");
-            text_cat(what, BASS_SOUND[fac.bass_sound]);
+            if (fac.bass_mode == MAUTO)
+                text_cat(what, "A:");
+            text_cat(what, BASS_MODE[mv.bass_mode]);
+            text_cat(what, "/");
+            text_cat(what, BASS_SOUND[mv.bass_sound]);
         } else if (t == TRK_HARMONY) {
-            text_cat(what, HARM_MODE[fac.harm_mode]);
-            text_cat(what, " / ");
-            text_cat(what, HARM_SOUND[fac.harm_sound]);
+            if (fac.harm_mode == MAUTO)
+                text_cat(what, "A:");
+            text_cat(what, mv.harm_detail[0] ? mv.harm_detail : "PAD");
+            if (mv.harm_pad && mv.harm_detail[0])
+                text_cat(what, "+P");
+            text_cat(what, "/");
+            text_cat(what, HARM_SOUND[mv.harm_sound]);
         } else
-            text_cat(what, "(TO COME)");
-        if (t == fac.focus)
+            text_cat(what, "(PHASE 4)");
+        if (focused)
             cv_rect(0, y, 240, 18, RGB(20, 60, 75));
-        cv_rect(0, y, 3, 18, t == fac.focus ? C_CYAN : C_BLACK);
+        cv_rect(0, y, 3, 18, focused ? C_CYAN : C_BLACK);
         {
             char num[2] = {(char)('1' + t), 0};
             cv_text(7, y + 1, &FONT_S, num, C_CYAN);
         }
         cv_text(20, y + 1, &FONT_S, TRACK_NAME[t], c);
-        cv_text(92, y + 3, &FONT_XS, what, muted && !wait ? C_GRAY : C_HI);
-        cv_rect(184, y + 8, 22, 3, C_LINE);
-        cv_rect(184, y + 8, fac.level[t] * 22 / 127, 3, muted ? C_GRAY : C_CYAN);
+        cv_text(86, y + 3, &FONT_XS, what, muted && !wait ? C_GRAY : C_HI);
+        cv_rect(194, y + 8, 12, 3, C_LINE);
+        cv_rect(194, y + 8, fac.level[t] * 12 / 127, 3, muted ? C_GRAY : C_CYAN);
         cv_text(210, y + 3, &FONT_XS, wait ? "WAIT" : muted ? "OFF" : "ON", wait ? C_ORANGE : muted ? C_GRAY : C_GREEN);
+    }
+}
+/* the BASE's row, where the state line is: the style, the progression (A: AUTO), the chord sounding */
+static void facility_base_row(void)
+{
+    struct music_view mv;
+    char t[24];
+    music_view(&mv);
+    if (fac.focus == FOC_BASE)
+        cv_rect(0, 0, 240, 26, RGB(20, 60, 75));
+    cv_rect(0, 0, 3, 26, fac.focus == FOC_BASE ? C_CYAN : C_BLACK);
+    /* a style or a progression asked for and not yet sounding (from the next 4 bars): amber */
+    cv_text(7, 0, &FONT_M, music_style_name(fac.style), fac.style != mv.style ? C_ORANGE : C_RED);
+    t[0] = 0;
+    if (fac.prog == MAUTO)
+        text_cat(t, "A:");
+    text_cat(t, fac.prog != MAUTO && (fac.prog != mv.prog || fac.style != mv.style) ? music_prog_name(fac.style, fac.prog)
+                                                                                  : mv.prog_name);
+    {
+        int32_t w = text_w(&FONT_B, mv.chord);
+        cv_text(234 - w, 4, &FONT_B, mv.chord, C_WHITE);
+        cv_text(228 - w - text_w(&FONT_XS, t), 9, &FONT_XS, t, C_GRAY);
     }
 }
 static void facility_knobs(void)
 {
     char t[16];
-    unsigned f = fac.focus;
+    unsigned f;
+    if (fac.focus == FOC_BASE) {
+        static const char *const SPEED[3] = {"SLOW", "AS IS", "FAST"};
+        int_text(fac.energy, t);
+        value(6, 46, "ENERGY", t, fac.energy, 0);
+        value(64, 46, "CHORDS", SPEED[fac.chords < 43u ? 0 : fac.chords < 86u ? 1 : 2], fac.chords, 1);
+        if (fac.autodub)
+            int_text(fac.autodub, t);
+        else
+            t[0] = 0, text_cat(t, "OFF");
+        value(122, 46, "AUTO DUB", t, fac.autodub, 0);
+        value(180, 46, "FORM", "F2B", 0, 0);
+        return;
+    }
+    f = fac.focus - 1u;
     int_text(fac.level[f], t);
     value(6, 46, "LEVEL", t, fac.level[f], 0);
     if (f == TRK_BREAK) {
@@ -692,6 +777,26 @@ static void facility_knobs(void)
         }
     } else
         cv_text(64, 59, &FONT_XS, "THE MELODY COMES IN PHASE 4", C_GRAY);
+}
+/* the line at the bottom: what the focus's encoders do, its style and speed */
+static void facility_hint(char *h)
+{
+    struct music_view mv;
+    unsigned f;
+    h[0] = 0;
+    if (fac.focus == FOC_BASE) {
+        text_cat(h, "ALGO STYLE  PRESET PROGRESSION");
+        return;
+    }
+    f = fac.focus - 1u;
+    if (f == TRK_BREAK || f == TRK_MELODY) {
+        text_cat(h, f == TRK_BREAK ? "PRESET BREAK  GLO = BACK" : "GLO = BACK");
+        return;
+    }
+    music_view(&mv);
+    text_cat(h, "STYLE ");
+    text_cat(h, fac.tstyle[f] == MSTYLE_BASE ? "= BASE" : music_style_name(fac.tstyle[f]));
+    text_cat(h, mv.feel[f] == 1 ? "  HALF SPEED" : mv.feel[f] == 4 ? "  DOUBLE SPEED" : "");
 }
 
 static void draw(void)
@@ -798,6 +903,8 @@ static void draw(void)
     cv_begin(240, 126, bg);
     if (roll >= 0)
         state_name(ROLL_NAME[roll], "", now);
+    else if (st.page == PAGE_FACILITY)
+        facility_base_row();
     else if (jungle_instant_active()) {      /* the first of them by name, + if there are more */
         unsigned fx = jungle_instant_active(), k = fx & 1u ? 0u : fx & 2u ? 1u : fx & 4u ? 2u : 3u;
         state_name(INSTANT_NAME[k], fx & ~(1u << k) ? "+" : "", now);
@@ -805,7 +912,7 @@ static void draw(void)
         cv_text(6, 0, &FONT_M, "EXT: WAITING", C_GREEN);
     else
         cv_text(6, 0, &FONT_M, jungle_playing() ? "PLAYING" : "STOPPED", jungle_playing() ? C_GREEN : C_GRAY);
-    {
+    if (st.page != PAGE_FACILITY) {
         const struct jungle_break *b = break_at(st.brk);
         const char *name = b ? b->name : "NO BREAK";
         cv_text(234 - text_w(&FONT_B, name), 6, &FONT_B, name, b ? C_WHITE : C_RED);
@@ -890,7 +997,12 @@ static void draw(void)
     }
     {
         const char *hint = st.page == PAGE_EQ ? "EQ: ENV = BACK" : st.page == PAGE_FX ? "FX: FX = BACK" :
-                           st.page == PAGE_FACILITY ? "SELECT = FOCUS  GLO = BACK" : "HOLD WHITE = ROLL";
+                           "HOLD WHITE = ROLL";
+        char fh[40];
+        if (st.page == PAGE_FACILITY) {
+            facility_hint(fh);
+            hint = fh;
+        }
         cv_text(234 - text_w(&FONT_XS, hint), 104, &FONT_XS, hint, C_GRAY);
     }
     cv_blit(0, 114);
