@@ -115,6 +115,9 @@ void jungle_variation(unsigned rhythm);
 /* SEQ fill: each phrase ends with one white-key effect chosen at random,
  * from 8, 4 or 2 steps before the end (1/32 rolls only in the last 2). */
 void jungle_auto_roll(unsigned on);
+/* Facility's form: the next phrase ends with this white key's roll, `length` steps before its end, SEQ's fills on
+ * or off (asked before the phrase starts: its pattern and fill are chosen then). */
+void jungle_request_fill(unsigned key, unsigned length);
 /* Freeze keeps the current pattern instead of generating a new one. */
 void jungle_freeze(unsigned on);
 /* Replace the pattern with the straight break at the next step. */

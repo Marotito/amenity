@@ -162,6 +162,16 @@ static struct voice voices[2];
 static struct jungle_step steps[JUNGLE_STEPS];
 static uint8_t fill_key;     /* SEQ fill this phrase: 0, 1 + white key, or 17 + instant effect (0..2) */
 enum { FILL_INSTANT = 17 };
+/* Facility's form: a fill asked for the next phrase (a white key, its length in steps), whether SEQ's fills are on
+ * or not; the phrase that plays it has it forced */
+static volatile uint8_t req_fill_key, req_fill_len;
+static uint8_t fill_forced;
+void jungle_request_fill(unsigned key, unsigned length)
+{
+    if (key >= JUNGLE_ROLL_KEYS || !length || length > JUNGLE_STEPS) return;
+    req_fill_len = (uint8_t)length;
+    req_fill_key = (uint8_t)(1U + key);
+}
 static uint8_t fill_sweep;   /* this phrase's fill sweeps the filter too */
 #define SWEEP_DAMP 11702     /* Q 1.4, as when K4 turns */
 static volatile uint8_t ctl_instant, view_instant;
@@ -542,6 +552,14 @@ static JUNGLE_AUDIO_CODE void generate(void)
         fill_start = (uint16_t)((JUNGLE_STEPS - length) * JUNGLE_TICKS);
         fill_sweep = rnd_below(4) == 0U;
     }
+    fill_forced = 0;
+    if (req_fill_key) {                      /* Facility's form asked for this one */
+        fill_key = req_fill_key;
+        fill_start = (uint16_t)((JUNGLE_STEPS - req_fill_len) * JUNGLE_TICKS);
+        fill_sweep = 0;
+        fill_forced = 1;
+        req_fill_key = 0;
+    }
     pattern_ready = 1;
 }
 
@@ -601,7 +619,7 @@ static JUNGLE_AUDIO_CODE void trigger(unsigned slice, int pitch, int32_t gain, u
 
 static JUNGLE_AUDIO_CODE unsigned auto_request(void)
 {
-    return ctl_auto && fill_key && fill_key < FILL_INSTANT && bar_tick >= fill_start ? fill_key : 0U;
+    return (ctl_auto || fill_forced) && fill_key && fill_key < FILL_INSTANT && bar_tick >= fill_start ? fill_key : 0U;
 }
 
 static JUNGLE_AUDIO_CODE void fire_roll(void)
@@ -886,7 +904,7 @@ JUNGLE_AUDIO_CODE void jungle_render(int32_t *out, unsigned frames, uint32_t now
      * the lowest over the fill, linearly in the knob's steps; the knob's value again at the phrase's start. */
     unsigned filter = ctl_filter;
     int32_t filter_damp = ctl_filter_damp;
-    unsigned sweeping = ctl_auto && fill_key && fill_sweep && was_playing && bar_tick >= fill_start;
+    unsigned sweeping = (ctl_auto || fill_forced) && fill_key && fill_sweep && was_playing && bar_tick >= fill_start;
     if (sweeping) {
         unsigned from = filter > FILTER_OPEN ? FILTER_OPEN : filter;
         unsigned span = BAR_TICKS - fill_start, done = bar_tick - fill_start;
@@ -901,7 +919,7 @@ JUNGLE_AUDIO_CODE void jungle_render(int32_t *out, unsigned frames, uint32_t now
     filter_was_open = filter == FILTER_OPEN;
     /* Instant effects: held, or the SEQ fill's from its first tick (taken a block at a time). */
     instant = ctl_instant;
-    if (ctl_auto && fill_key >= FILL_INSTANT && bar_tick >= fill_start && was_playing)
+    if ((ctl_auto || fill_forced) && fill_key >= FILL_INSTANT && bar_tick >= fill_start && was_playing)
         instant |= (uint8_t)(1U << (fill_key - FILL_INSTANT));
     view_instant = (uint8_t)(instant | (sweeping ? JUNGLE_FX_SWEEP : 0U));
     view_filter = (uint8_t)filter;

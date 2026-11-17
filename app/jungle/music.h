@@ -6,7 +6,11 @@
  *
  * Styles (F2a): the BASE style says what chords sound (its four progressions, each chord with its scale, how fast
  * they change) and is one for all; each track has a style of its own (or the BASE's) that says how it plays them:
- * its modes, its sounds, its speed (half, normal or double: the one that brings the tempo nearest its centre). */
+ * its modes, its sounds, its speed (half, normal or double: the one that brings the tempo nearest its centre).
+ * The form (F2b): sections (intro, verse, pre, chorus, bridge, breakdown, drop, dub version) in a form of the style's,
+ * each with its tracks, its energy and its progression; the transitions in each section's last phrase. A song
+ * repeats without its intro; a new one at PLAY. The hand rules: a mute of yours, a mode or a sound set by hand, a
+ * roll held, the form leaves alone. */
 #ifndef MUSIC_H
 #define MUSIC_H
 #include <stdint.h>
@@ -39,6 +43,7 @@ void music_energy(unsigned v127);
 void music_chord_speed(unsigned v127);                       /* <43 slower (x2), <86 as written, faster (x1/2) */
 void music_autodub(unsigned v127);                           /* how often a track drops out for a bar or two */
 void music_track_style(unsigned track, unsigned style);      /* MSTYLE_BASE or a style */
+void music_form(unsigned v127);   /* the song's form: <43 OFF, <86 ON, else ON + BREAK (it mutes the break, asks fills) */
 void music_bass_mode(unsigned mode);                         /* MAUTO or a mode */
 void music_bass_timbre(unsigned timbre);
 void music_harm_mode(unsigned mode);
@@ -54,6 +59,9 @@ struct music_view {
     uint8_t harm_pad;                        /* the pad sounding with it */
     const char *harm_detail;                 /* the rhythm layer's figure: "A", "J HEMIOLA", ... */
     uint8_t feel[TRACKS];                    /* 1 half, 2 normal, 4 double */
+    uint8_t form;                            /* 0 OFF, 1 ON, 2 ON + BREAK */
+    const char *section;                     /* the section sounding (form on) */
+    uint8_t sect_bar, sect_bars;             /* its bar (1..) and its length, in the style's bars */
 };
 void music_view(struct music_view *v);
 const char *music_style_name(unsigned style);

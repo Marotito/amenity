@@ -110,7 +110,7 @@ static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB
 static struct {
     uint8_t focus, stress;
     uint8_t level[TRACKS];
-    uint8_t style, prog, energy, chords, autodub;     /* the BASE (prog: MAUTO or 0..3) */
+    uint8_t style, prog, energy, chords, autodub, form;   /* the BASE (prog: MAUTO or 0..3) */
     uint8_t tstyle[TRACKS];                          /* MSTYLE_BASE or a style */
     uint8_t bass_mode, bass_sound, harm_mode, harm_sound;   /* MAUTO or one */
     uint8_t param[TRACKS][3];                /* K2..K4 of the bass and the harmony */
@@ -407,6 +407,8 @@ static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
             music_chord_speed(fac.chords = (uint8_t)turn(fac.chords, e[EN_K2]));
         if (e[EN_K3])
             music_autodub(fac.autodub = (uint8_t)turn(fac.autodub, e[EN_K3]));
+        if (e[EN_K4])
+            music_form(fac.form = (uint8_t)turn(fac.form, e[EN_K4]));
         return;
     }
     f = fac.focus - 1;
@@ -735,7 +737,23 @@ static void facility_base_row(void)
     {
         int32_t w = text_w(&FONT_B, mv.chord);
         cv_text(234 - w, 4, &FONT_B, mv.chord, C_WHITE);
-        cv_text(228 - w - text_w(&FONT_XS, t), 9, &FONT_XS, t, C_GRAY);
+        if (mv.section[0]) {                 /* the form: the section and its bar, the progression below */
+            char sct[24];
+            sct[0] = 0;
+            text_cat(sct, mv.section);
+            text_cat(sct, " ");
+            {
+                char nb[8];
+                int_text(mv.sect_bar, nb);
+                text_cat(sct, nb);
+                text_cat(sct, "/");
+                int_text(mv.sect_bars, nb);
+                text_cat(sct, nb);
+            }
+            cv_text(228 - w - text_w(&FONT_XS, sct), 1, &FONT_XS, sct, C_ORANGE);
+            cv_text(228 - w - text_w(&FONT_XS, t), 13, &FONT_XS, t, C_GRAY);
+        } else
+            cv_text(228 - w - text_w(&FONT_XS, t), 9, &FONT_XS, t, C_GRAY);
     }
 }
 static void facility_knobs(void)
@@ -752,7 +770,10 @@ static void facility_knobs(void)
         else
             t[0] = 0, text_cat(t, "OFF");
         value(122, 46, "AUTO DUB", t, fac.autodub, 0);
-        value(180, 46, "FORM", "F2B", 0, 0);
+        {
+            static const char *const FORM_V[3] = {"OFF", "ON", "+BRK"};
+            value(180, 46, "FORM", FORM_V[fac.form < 43u ? 0 : fac.form < 86u ? 1 : 2], fac.form, 0);
+        }
         return;
     }
     f = fac.focus - 1u;

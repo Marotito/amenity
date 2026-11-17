@@ -62,6 +62,8 @@ static float soft(float x) { return x / (1.0f + fm_fabsf(x)); }
 static float sine_tab[1024];
 static float sine(float ph) { return sine_tab[(int)(ph * 1024.0f) & 1023]; }
 static float ms_coef(float ms) { return 1.0f - fm_expf(-1.0f / (ms * 0.001f * SR)); }
+static float fbright_v = 1.0f;
+#define fbright fbright_v
 static float knob_mul(unsigned v) { return fm_exp2f(((float)v - 64.0f) * (1.0f / 32.0f)); }   /* 0.25 .. 1 .. 4 */
 
 /* ------------------------------------------------------------ the harmony's data --- */
@@ -131,11 +133,51 @@ static const struct style STYLE[MSTYLES] = {
 const char *music_style_name(unsigned s) { return s < MSTYLES ? STYLE[s].name : "BASE"; }
 const char *music_prog_name(unsigned s, unsigned p) { return s < MSTYLES && p < 4u ? STYLE[s].p[p].name : "AUTO"; }
 
+/* ------------------------------------------------------------- the form's data --- */
+/* A section: its energy (from .. to, a PRE rises), its tracks, the progression it takes (A the verse's, B the
+ * chorus's, C the bridge's), what the harmony and the bass do when they are in AUTO, AUTO DUB's share */
+enum { S_INTRO, S_VERSE, S_PRE, S_CHORUS, S_BRIDGE, S_BREAKDOWN, S_DROP, S_DUB, S_KINDS };
+enum { H_PAD, H_RHY, H_FULL };   /* the harmony: the pad alone, the rhythm layer (pad as the style likes), both */
+enum { BL_LONG, BL_STYLE, BL_STRONG };   /* the bass: held roots, the style's lines, the style's strongest */
+#define PL_BREAK 1u
+#define PL_BASS 2u
+#define PL_HARM 4u
+struct sect_kind { const char *name; float e0, e1; uint8_t play, harm, bass; float dub; };
+static const struct sect_kind SECT[S_KINDS] = {
+    { "INTRO",     0.30f, 0.30f, PL_BREAK | PL_BASS | PL_HARM, H_PAD,  BL_LONG,   0.0f },   /* the bass or the pad */
+    { "VERSE",     0.40f, 0.40f, PL_BREAK | PL_BASS | PL_HARM, H_RHY,  BL_STYLE,  0.0f },
+    { "PRE",       0.50f, 0.85f, PL_BREAK | PL_BASS | PL_HARM, H_RHY,  BL_STYLE,  0.0f },
+    { "CHORUS",    0.80f, 0.80f, PL_BREAK | PL_BASS | PL_HARM, H_FULL, BL_STYLE,  0.0f },
+    { "BRIDGE",    0.50f, 0.50f, PL_BREAK | PL_BASS | PL_HARM, H_PAD,  BL_LONG,   0.0f },
+    { "BREAKDOWN", 0.20f, 0.20f, PL_BASS | PL_HARM,            H_PAD,  BL_LONG,   0.0f },
+    { "DROP",      0.95f, 0.95f, PL_BREAK | PL_BASS | PL_HARM, H_FULL, BL_STRONG, 0.0f },
+    { "DUB",       0.50f, 0.50f, PL_BREAK | PL_BASS | PL_HARM, H_RHY,  BL_STYLE,  0.6f },
+};
+/* the forms: two a style (Marote, 17 nov), {section, bars of the style, progression 0 A 1 B 2 C} */
+struct form { uint8_t n; uint8_t s[10][3]; };
+static const struct form FORM[MSTYLES][2] = {
+    { { 5, { {S_INTRO,8,0}, {S_DROP,16,1}, {S_BREAKDOWN,8,0}, {S_PRE,4,0}, {S_DROP,16,1} } },
+      { 5, { {S_INTRO,4,0}, {S_DROP,8,1}, {S_BRIDGE,8,2}, {S_DROP,16,1}, {S_BREAKDOWN,8,0} } } },
+    { { 8, { {S_VERSE,8,0}, {S_VERSE,8,0}, {S_BRIDGE,8,2}, {S_VERSE,8,0},
+             {S_CHORUS,8,0}, {S_CHORUS,8,0}, {S_BRIDGE,8,2}, {S_CHORUS,8,0} } },   /* AABA twice, the second denser */
+      { 4, { {S_INTRO,4,0}, {S_VERSE,16,0}, {S_BRIDGE,8,2}, {S_CHORUS,16,0} } } },
+    { { 6, { {S_INTRO,8,0}, {S_PRE,8,0}, {S_DROP,16,1}, {S_BREAKDOWN,8,0}, {S_PRE,8,0}, {S_DROP,16,1} } },
+      { 4, { {S_INTRO,16,0}, {S_DROP,16,1}, {S_BREAKDOWN,16,0}, {S_DROP,16,1} } } },
+    { { 7, { {S_INTRO,4,0}, {S_VERSE,16,0}, {S_CHORUS,8,1}, {S_VERSE,16,0}, {S_CHORUS,8,1}, {S_BRIDGE,8,2}, {S_CHORUS,8,1} } },
+      { 7, { {S_INTRO,8,0}, {S_VERSE,8,0}, {S_CHORUS,8,1}, {S_VERSE,8,0}, {S_CHORUS,8,1}, {S_VERSE,8,0}, {S_CHORUS,8,1} } } },
+    { { 4, { {S_VERSE,8,0}, {S_CHORUS,8,1}, {S_VERSE,8,0}, {S_DUB,16,0} } },
+      { 4, { {S_INTRO,4,0}, {S_VERSE,16,0}, {S_DUB,16,0}, {S_CHORUS,8,1} } } },
+};
+/* the fill each style asks into a bigger section (white keys: 0 1/4 REPEAT, 1 BUILD, 2 STRETCH, 3 ECHO, 4 1/8 REPEAT,
+ * 7 1/8 SHRINK, 8 1/16 REPEAT) */
+static const uint8_t STYLE_FILL[MSTYLES] = { 7, 0, 1, 4, 3 };
+
 /* ---------------------------------------------------------------- the controls --- */
 static volatile uint8_t c_style = MSTYLE_BREAKCORE, c_prog = MAUTO, c_stress;
 static volatile uint8_t c_tstyle[TRACKS] = { MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE };
 static volatile uint8_t c_bass_mode = MAUTO, c_timbre = MAUTO, c_harm = MAUTO, c_hsound = MAUTO;
 static volatile float c_energy = 0.5f, c_speed = 1.0f, c_dub;
+static volatile uint8_t c_form;
 static volatile int8_t c_root = -1;
 static volatile uint8_t want[TRACKS] = { 0, 1, 1, 1 }, want_q[TRACKS];   /* muted: as asked (main loop) */
 static volatile uint8_t heard_muted[TRACKS] = { 0, 1, 1, 1 };            /* as it sounds (audio) */
@@ -173,6 +215,7 @@ void music_prog(unsigned p) { c_prog = (uint8_t)(p < 4u ? p : MAUTO); }
 void music_energy(unsigned v) { c_energy = (float)v * (1.0f / 127.0f); }
 void music_chord_speed(unsigned v) { c_speed = v < 43u ? 2.0f : v < 86u ? 1.0f : 0.5f; }
 void music_autodub(unsigned v) { c_dub = (float)v * (1.0f / 127.0f); }
+void music_form(unsigned v) { c_form = (uint8_t)(v < 43u ? 0 : v < 86u ? 1 : 2); }
 void music_track_style(unsigned t, unsigned s) { if (t < TRACKS) c_tstyle[t] = (uint8_t)(s < MSTYLES ? s : MSTYLE_BASE); }
 void music_bass_mode(unsigned m) { c_bass_mode = (uint8_t)(m < MBASS_MODES ? m : MAUTO); }
 void music_bass_timbre(unsigned m) { c_timbre = (uint8_t)(m < MTIMBRES ? m : MAUTO); }
@@ -228,9 +271,38 @@ static uint8_t speed_for(float centre)   /* half, normal or double: the one near
     return 2;
 }
 static uint8_t track_style(int t) { return c_tstyle[t] == MSTYLE_BASE ? base_style : c_tstyle[t]; }
+/* the form: the song (a form of the style's, its three progressions), the section sounding */
+static uint8_t form_on, song_var, sec_i, sec_prog[3], song_req = 1;
+static uint32_t sec_start, sec_len;                 /* half-16ths of the BASE */
+static uint8_t form_mute[TRACKS], form_override[TRACKS], last_want[TRACKS] = { 0, 1, 1, 1 };
+static uint8_t trans_up, trans_drop, trans_down, fill_asked;
+/* (fbright, the harmony's filter closing into a smaller section: with the small pieces above) */
+static const struct sect_kind *sect(void) { return &SECT[FORM[base_style][song_var].s[sec_i][0]]; }
+static int sect_next_i(void)   /* the next section's index: the song again without its intro */
+{
+    const struct form *F = &FORM[base_style][song_var];
+    int n = sec_i + 1;
+    if (n >= F->n) n = F->s[0][0] == S_INTRO && F->n > 1 ? 1 : 0;
+    return n;
+}
+static float energy(void)   /* the knob's energy (K1 on BASE), and the section's when the form plays */
+{
+    if (!form_on) return c_energy;
+    const struct sect_kind *k = sect();
+    float done = sec_len ? (float)(bpos - sec_start) / (float)sec_len : 0.0f;
+    float e = (k->e0 + (k->e1 - k->e0) * done) * c_energy * 2.0f;
+    return e > 1.0f ? 1.0f : e;
+}
 static void pick_next_prog(void)
 {
     if (c_prog != MAUTO) { next_prog_ix = c_prog; prog_auto = 0; return; }
+    if (form_on) {   /* the section's progression, again; the next section's when this cycle ends it */
+        prog_auto = 1;
+        next_prog_ix = prog_ix;
+        if (sec_start + sec_len <= bpos + prog_len(P(), cyc_speed))
+            next_prog_ix = sec_prog[FORM[base_style][song_var].s[sect_next_i()][2]];
+        return;
+    }
     prog_auto = 1;
     next_prog_ix = prog_ix;
     if (rnd(100) < 40) do next_prog_ix = (uint8_t)rnd(4); while (next_prog_ix == prog_ix);
@@ -366,7 +438,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
             h->fenv *= 0.9985f;
         } else {
             s = 0.5f * (saw(&h->ph[0], inc * 1.0035f) + saw(&h->ph[1], inc * 0.9965f));
-            float g2 = L->timbre == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv) * h_bright);
+            float g2 = L->timbre == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv) * h_bright * fbright);
             s = svf_lp(&h->f, s, g2, L->k);
             h->fenv *= 0.9992f;
         }
@@ -431,7 +503,7 @@ enum { M_COUNT = 6, M_SPACE = 5 };
 static int jz_bar[2], jz_hemiola, jz_tied, jz_last_hemiola, jz_kind, jz_shift;
 static void jazz_plan(void)
 {
-    float e = c_energy;
+    float e = energy();
     jz_hemiola = jz_kind == 1 || (jz_kind == 0 && !jz_last_hemiola && rnd(100) < (unsigned)(10 + 20 * e));
     jz_last_hemiola = jz_hemiola;
     jz_shift = jz_kind == 1 && rnd(2) ? 2 : 0;
@@ -476,7 +548,7 @@ static void jazz_step(int v)
 static void skank_step(int v)
 {
     int in8 = v % 8;
-    float e = c_energy;
+    float e = energy();
     switch (md) {
     case MD_A: if (in8 == 4) schedule(0, 0, 0.9f, 1, 0); break;
     case MD_B: if (in8 == 4) schedule(0, 0, 0.9f, 1, 0); else if (in8 == 6 && frnd() < 0.5f + e) schedule(0, 0, 0.45f, 1, 0); break;
@@ -536,6 +608,12 @@ set:
     }
     layer_retime(&rhy, h_decay);
 }
+static void harmony_phrase(void);
+static void harmony_section(void)   /* a section starts: the harmony in AUTO does as it says, now */
+{
+    if (!form_on || c_harm != MAUTO || stress) return;
+    harmony_phrase();
+}
 static void harmony_phrase(void)   /* the harmony track's own phrase starts */
 {
     const struct style *S = &STYLE[track_style(TRK_HARMONY)];
@@ -548,16 +626,21 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
         layer_chord(&rhy, cur_chord, TRIAD, 1, 0.6f, 0, 1);
         return;
     }
-    rhythm_on = harm_mode_now != MHARM_PAD;
-    if (rhythm_on) rhythm_phrase(); else layer_release(&rhy);
+    rhythm_on = harm_mode_now != MHARM_PAD && !(form_on && harm_mode_now == MAUTO && sect()->harm == H_PAD);
+    if (rhythm_on) {
+        if (form_on && harm_mode_now == MAUTO && sect() == &SECT[S_DROP] && S->stabs_after_build) build_was_on = 1;
+        rhythm_phrase();
+    } else layer_release(&rhy);
     if (harm_mode_now == MHARM_PAD || harm_mode_now == MHARM_MIX_PAD) pad_on = 1;
     else if (harm_mode_now != MAUTO) pad_on = 0;
+    else if (form_on && sect()->harm != H_RHY) pad_on = 1;   /* the section's pad */
     else if (--pad_left <= 0) { pad_on = rnd(100) < S->pad_pct; pad_left = 2 + (int)rnd(3); }   /* AUTO: a few phrases */
     if (pad_on) layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 1);
     else layer_release(&pad);
 }
 
 /* ------------------------------------------------------- the bass line --- */
+static int form_hole(int t);
 /* An event's pitch: a chord degree (0 root 1 3rd 2 5th 3 7th 4 octave 5 / 6 a half step under / over the next
  * bar's root), or steps of the chord's scale over its root (K_SCALE), both read from the chord sounding then */
 enum { K_DEG, K_SCALE };
@@ -622,7 +705,7 @@ static const int8_t RIFF_CELLS[4][5][2] = {
 static void make_acid(int mutate)
 {
     static const int8_t STEPS[11] = { 0, 0, 0, 0, 7, 7, 1, 2, 4, 3, -1 };   /* scale steps: 7 is the octave of a 7-note scale */
-    float e = c_energy;
+    float e = energy();
     int from = mutate ? (int)rnd(16) : 0, to = mutate ? from + 2 : 16;
     for (int k = from; k < to; ++k) {
         int i = k & 15;
@@ -634,7 +717,7 @@ static void make_acid(int mutate)
 }
 static void make_walk(void)   /* quarter notes: root, a step or a chord tone, the fifth, into the next root */
 {
-    float e = c_energy;
+    float e = energy();
     for (int bar = 0; bar < 2; ++bar) {
         int b = bar * 16, up = (int)rnd(2);
         set_ev(&bseq[b], K_DEG, 0, 3, 0, 1);
@@ -656,9 +739,16 @@ static void bass_plan(void)   /* the bass track's own phrase starts */
 {
     const struct style *S = &STYLE[track_style(TRK_BASS)];
     int want_mode = c_bass_mode == MAUTO ? -1 : c_bass_mode;
-    float e = c_energy;
+    float e = energy();
     if (want_mode >= 0) { if (want_mode != bmode) { bmode = want_mode; b_age = 0; } }
-    else if (--b_left <= 0) {   /* AUTO: a line a few phrases at a time */
+    else if (form_on && sect()->bass != BL_STYLE) {   /* the section says: held roots, or the style's strongest */
+        int m = MBASS_LONG;
+        if (sect()->bass == BL_STRONG) {
+            unsigned best = 0;
+            for (int i = 0; i < MBASS_MODES; ++i) if (i != MBASS_KICK && S->bass_w[i] > best) { best = S->bass_w[i]; m = i; }
+        }
+        if (m != bmode) { bmode = m; b_age = 0; }
+    } else if (--b_left <= 0) {   /* AUTO: a line a few phrases at a time */
         int m = pick_bass_mode(S);
         if (m != bmode) { bmode = m; b_age = 0; }
         b_left = 2 + (int)rnd(3);
@@ -705,6 +795,7 @@ static void bass_step(int v)
 {
     if (v == 0) bass_plan();
     if (bmode == MBASS_KICK || jungle_roll_active() == 1) return;   /* BUILD: the bass waits for the drop */
+    if (form_hole(TRK_BASS)) { bass.gate_left = 0.0f; return; }
     struct bev *e = &bseq[v];
     if (!e->on) return;
     int len = e->len, slide = e->slide;
@@ -716,6 +807,81 @@ static void bass_step(int v)
     bass_play(bev_note(e, v), (float)len * vsps(TRK_BASS) * (len == 1 ? 0.55f : 0.92f), slide, e->acc);
 }
 
+/* ------------------------------------------------------------- the form --- */
+static void harmony_section(void);
+static void section_enter(int i)
+{
+    const struct form *F = &FORM[base_style][song_var];
+    const struct sect_kind *k;
+    uint32_t plen, bars;
+    int up = trans_up || trans_drop;
+    sec_i = (uint8_t)i;
+    k = sect();
+    if (c_prog == MAUTO) prog_ix = sec_prog[F->s[i][2]];
+    next_prog_ix = prog_ix;
+    cyc_start = bpos;   /* the progression from its first chord */
+    cyc_speed = c_speed;
+    if (c_root >= 0) key_root = c_root;
+    /* the section's length: whole progressions (a blues is not cut: a progression longer than the section stretches it) */
+    plen = prog_len(P(), cyc_speed) / 32u;
+    bars = F->s[i][1];
+    if (plen) { uint32_t n = (bars + plen / 2u) / plen; bars = (n ? n : 1u) * plen; }
+    sec_len = bars * 32u;
+    pick_next_prog();
+    /* its tracks: the form's own mutes (yours stay yours); an intro has the bass or the pad */
+    for (int t = 0; t < TRACKS; ++t) { form_mute[t] = 0; form_override[t] = 0; }
+    if (!(k->play & PL_BREAK) && c_form == 2) form_mute[TRK_BREAK] = 1;
+    if (F->s[i][0] == S_INTRO) form_mute[rnd(2) ? TRK_BASS : TRK_HARMONY] = 1;
+    b_left = 0;                                     /* the bass picks its line again */
+    harmony_section();
+    if (up && !heard_muted[TRK_HARMONY] && !form_mute[TRK_HARMONY])   /* the downbeat after a rise: a chord struck */
+        schedule(0, 0, 1.0f, 4, 0);
+    trans_up = trans_drop = trans_down = 0;
+    fill_asked = 0;
+    fbright = 1.0f;
+}
+static void song_new(void)   /* at PLAY, at a new style, with the form turned on: a form, three progressions */
+{
+    song_var = (uint8_t)rnd(2);
+    sec_prog[0] = (uint8_t)rnd(4);
+    do sec_prog[1] = (uint8_t)rnd(4); while (sec_prog[1] == sec_prog[0]);
+    do sec_prog[2] = (uint8_t)rnd(4); while (sec_prog[2] == sec_prog[0] || sec_prog[2] == sec_prog[1]);
+    trans_up = trans_drop = trans_down = 0;
+    section_enter(0);
+}
+static void form_step(void)   /* each 16th of the break, the form playing */
+{
+    uint32_t left_h = sec_start + sec_len > bpos ? sec_start + sec_len - bpos : 0;
+    uint32_t left = left_h / feel[TRK_BREAK];      /* real 16ths to the section's end */
+    if (!left) { sec_start += sec_len; section_enter(sect_next_i()); return; }
+    if (left <= 32u && !trans_up && !trans_drop && !trans_down) {   /* the last phrase: which way it goes */
+        const struct sect_kind *now = sect(), *next = &SECT[FORM[base_style][song_var].s[sect_next_i()][0]];
+        if (next == &SECT[S_DROP] && now != &SECT[S_DROP]) trans_drop = 1;
+        else if (next->e0 > now->e1 + 0.1f) trans_up = 1;
+        else if (next->e0 < now->e1 - 0.1f) trans_down = 1;
+    }
+    /* the fill, asked a phrase ahead (the break chooses its fill as its phrase starts); not over a roll of yours */
+    if (c_form == 2 && !fill_asked && left > 32u && left <= 40u && jungle_roll_active() < 0) {
+        const struct sect_kind *now = sect(), *next = &SECT[FORM[base_style][song_var].s[sect_next_i()][0]];
+        if (next == &SECT[S_DROP] && now != &SECT[S_DROP]) jungle_request_fill(1, 16);   /* BUILD, the whole last bar */
+        else if (next->e0 > now->e1 + 0.1f) jungle_request_fill(STYLE_FILL[base_style], 8);
+        fill_asked = 1;
+    }
+    fbright = trans_down && left <= 32u ? 0.3f + 0.7f * (float)left / 32.0f : 1.0f;
+    if (left == 2u && trans_up && !heard_muted[TRK_BASS] && !form_mute[TRK_BASS] && bmode != MBASS_KICK) {
+        uint32_t ahead = 2u;   /* the bass's push: a half step under the next root, sliding in */
+        bass_play(root_midi(chord_ahead(ahead)) - 1, 2.0f * sps, 0, 1);
+    }
+}
+static int form_hole(int t)   /* the harmony's hole before a rise (half a bar), everything's last bar before a drop */
+{
+    uint32_t left;
+    if (!form_on || !(trans_up || trans_drop)) return 0;
+    left = (sec_start + sec_len - bpos) / feel[TRK_BREAK];
+    if (trans_drop) return left <= 16u;
+    return t == TRK_HARMONY && left <= 8u;
+}
+
 /* ------------------------------------------------------ the tracks' clocks --- */
 /* A track's 16th v (0..31, its phrase) from the break's 16th g: half speed on even g (v = g/2), double twice (2g now,
  * 2g+1 half a 16th later). Aligned on g, so every speed meets on the break's phrases. */
@@ -725,6 +891,7 @@ static void harmony_vstep(int v)
 {
     if (v == 0) harmony_phrase();
     layer_step_gates(&rhy);
+    if (form_hole(TRK_HARMONY)) { layer_release(&rhy); if (trans_drop) layer_release(&pad); return; }
     if (rhythm_on) { if (FAMILY[md] == 1) jazz_step(v); else skank_step(v); }
 }
 static void track_vstep(int t, int v)
@@ -750,7 +917,8 @@ static void autodub_bar(void)
 {
     int t, any = 0;
     for (t = 0; t < TRACKS; ++t) if (dub_drop[t]) { --dub_drop[t]; any = 1; }
-    if (any || c_dub <= 0.0f || frnd() >= c_dub * 0.3f) return;
+    float amount = c_dub + (form_on ? sect()->dub : 0.0f);
+    if (any || amount <= 0.0f || frnd() >= amount * 0.3f) return;
     static const uint8_t CAN[3] = { TRK_BREAK, TRK_BASS, TRK_HARMONY };
     t = CAN[rnd(3)];
     if (!heard_muted[t]) dub_drop[t] = (uint8_t)(1 + rnd(2));
@@ -788,13 +956,19 @@ static void on_step(int step, uint32_t at)
         base_style = c_style;
         feel[TRK_BREAK] = speed_for(STYLE[base_style].centre);
         for (int t = TRK_BASS; t < TRACKS; ++t) feel[t] = speed_for(STYLE[track_style(t)].centre);
-        if (new_style) { next_prog_ix = c_prog == MAUTO ? (uint8_t)rnd(4) : c_prog; cycle_start(); }
+        if (new_style) { next_prog_ix = c_prog == MAUTO ? (uint8_t)rnd(4) : c_prog; cycle_start(); song_req = 1; }
+    }
+    {   /* the form: on, off; a new song (at PLAY, a new style, turned on) from a phrase's start */
+        int f = c_form != 0;
+        if (f != form_on) { form_on = (uint8_t)f; song_req = 1; for (int t = 0; t < TRACKS; ++t) form_mute[t] = 0; }
+        if (form_on && song_req && step == 0) { song_req = 0; sec_start = bpos; song_new(); }
     }
     if (c_prog != MAUTO && c_prog != prog_ix && step == 0) { next_prog_ix = c_prog; cycle_start(); }   /* a chosen one: now */
+    if (form_on && !song_req) form_step();
     if (bpos - cyc_start >= prog_len(P(), cyc_speed)) cycle_start();
     {
         const struct chord *c = chord_in(P(), bpos - cyc_start, cyc_speed);
-        if (c != cur_chord) { cur_chord = c; if (pad_on) layer_chord(&pad, c, COLOUR, 0, 1.0f, 0, 1); }
+        if (c != cur_chord) { cur_chord = c; if (pad_on && !form_hole(TRK_HARMONY)) layer_chord(&pad, c, COLOUR, 0, 1.0f, 0, 1); }
     }
     if (g % 16u == 0) autodub_bar();
     track_tick(TRK_BASS);
@@ -841,6 +1015,10 @@ void music_view(struct music_view *v)
     v->harm_pad = (uint8_t)pad_on;
     v->harm_detail = rhythm_on ? MD_NAME[md] : "";
     for (int t = 0; t < TRACKS; ++t) v->feel[t] = feel[t];
+    v->form = c_form;
+    v->section = form_on && !song_req ? sect()->name : "";
+    v->sect_bar = (uint8_t)(form_on && !song_req ? (bpos - sec_start) / 32u + 1u : 0u);
+    v->sect_bars = (uint8_t)(form_on && !song_req ? sec_len / 32u : 0u);
 }
 
 enum { CHUNK = 256 };
@@ -852,7 +1030,9 @@ static void render_chunk(int32_t *lr, unsigned n)
     float tgt[TRACKS];
     for (int t = 0; t < TRACKS; ++t) {
         if (!want_q[t]) heard_muted[t] = want[t];   /* a plain tap: now */
-        tgt[t] = c_stress && t != TRK_BREAK ? lvl[t] : (heard_muted[t] || dub_drop[t]) ? 0.0f : lvl[t];
+        if (want[t] != last_want[t]) { last_want[t] = want[t]; form_override[t] = 1; }   /* your hand: the form lets go */
+        tgt[t] = c_stress && t != TRK_BREAK ? lvl[t] :
+                 (heard_muted[t] || dub_drop[t] || (form_on && form_mute[t] && !form_override[t])) ? 0.0f : lvl[t];
     }
     bass.mode = bass_sound_now;
     {   /* the transport stopped: every held note lets go (the pad's, the rhythm layer's, the bass's), nothing waits */
@@ -866,7 +1046,7 @@ static void render_chunk(int32_t *lr, unsigned n)
             for (int i = 0; i < 8; ++i) pend[i].live = 0;
             second_wait[TRK_BASS] = second_wait[TRK_HARMONY] = 0.0f;
         }
-        if (!was_playing && playing) { layer_retime(&pad, 1.0f); layer_retime(&rhy, h_decay); }   /* their own again */
+        if (!was_playing && playing) { layer_retime(&pad, 1.0f); layer_retime(&rhy, h_decay); song_req = 1; }   /* their own again; a new song */
         was_playing = playing;
     }
     if (h_retime) { h_retime = 0; layer_retime(&rhy, h_decay); }
@@ -874,7 +1054,7 @@ static void render_chunk(int32_t *lr, unsigned n)
     lfo_ph += (float)n / (sps * 32.0f);
     if (lfo_ph >= 1.0f) lfo_ph -= 1.0f;
     float tri = lfo_ph < 0.5f ? 2.0f * lfo_ph : 2.0f - 2.0f * lfo_ph;
-    float g_pad = g_of(900.0f * h_bright * (0.45f + 2.6f * h_move * tri * tri));
+    float g_pad = g_of(900.0f * h_bright * fbright * (0.45f + 2.6f * h_move * tri * tri));
     /* the tracks, each in its own buffer (the events at their frames) */
     for (unsigned i = 0; i < n; ++i) {
         while (e < nev && ev[e].frame <= i) {

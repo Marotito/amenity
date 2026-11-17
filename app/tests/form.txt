@@ -1,0 +1,46 @@
+# Facility F2b: the form (K4 on BASE): sections with their tracks and energy, the transitions (a fill asked of the
+# break, the harmony's hole, BUILD and silence before a drop), the song again without its intro; STOP + PLAY a new
+# song. Breakcore at 170, then acid.
+#   sh build.sh --host && app/build/host/amenity_host app/tests/form.txt build/form
+wait 900
+master 4096
+spin SELECT 10
+spin K2 18
+tap SAVE
+tap ARP
+tap GLO
+spin SELECT -1
+wait 50
+spin SELECT -1
+spin K4 50
+tap PLAY
+wav form.wav
+wait 300
+shot 01-intro.png
+wait 12000
+shot 02.png
+wait 12000
+shot 03.png
+wait 12000
+shot 04.png
+wait 12000
+shot 05.png
+wait 12000
+shot 06.png
+wait 12000
+shot 07.png
+expect peak_db_max <0
+tap PLAY
+wait 1500
+spin ALGO 1
+wait 50
+spin ALGO 1
+tap PLAY
+wait 300
+shot 08-acid.png
+wait 15000
+shot 09-acid.png
+wait 15000
+shot 10-acid.png
+expect peak_db_max <0
+wavstop
