@@ -1,4 +1,4 @@
-# The instant effects on the top three black keys (b8 C#, b9 D#, b10 F#), held then let go, and the SEQ fill
+# The instant effects on the top three black keys (b8 C#, b9 D#, b10 F#), held then let go, and the automatic fill (LFO on Amenity+)
 # picking them: the output's level each time, and what the screen and lights show.
 #   sh build.sh --host && app/build/host/amenity_host app/tests/instant.txt build/instant
 wait 900
@@ -33,6 +33,6 @@ press EDIT
 wait 400
 shot 05-cpu-on-edit.png
 release EDIT
-tap SEQ
+tap LFO
 wait 24000
 wavstop

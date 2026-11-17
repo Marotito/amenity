@@ -313,8 +313,8 @@ static void buttons_input(uint32_t btn, uint32_t now)
     if (PRESSED(B_REC))
         jungle_freeze(st.frozen = !st.frozen);
     /* Facility: GLO between the break's page and Facility's (with EDIT held: the CPU test, every voice held);
-     * LFO, ARP, SAVE mute the bass, the harmony, the melody on either page, HOME the break on Facility's: a tap at
-     * once, with SEL held from the next phrase (the 2 bars' end) */
+     * the four tracks' mutes on either page, in their order: HOME the break, SAVE the bass, ARP the harmony, SEQ the
+     * melody; a tap at once, with SEL held from the next phrase (the 2 bars' end). LFO: the automatic fills */
     if (PRESSED(B_GLO)) {
         if (btn >> B_EDIT & 1u) {
             music_stress(fac.stress = !fac.stress);
@@ -325,17 +325,15 @@ static void buttons_input(uint32_t btn, uint32_t now)
         }
     }
     {
-        static const uint8_t MUTE_BTN[3] = {B_LFO, B_ARP, B_SAVE};
+        static const uint8_t MUTE_BTN[TRACKS] = {B_HOME, B_SAVE, B_ARP, B_SEQ};
         unsigned t;
-        for (t = 0; t < 3u; t++)
-            if (PRESSED(MUTE_BTN[t]))
-                mute_toggle(TRK_BASS + t, btn);
-        if (st.page == PAGE_FACILITY && PRESSED(B_HOME))
-            mute_toggle(TRK_BREAK, btn);
+        for (t = 0; t < TRACKS; t++)
+            if (PRESSED(MUTE_BTN[t]) && !(t == TRK_BREAK && (btn >> B_EDIT & 1u)))
+                mute_toggle(t, btn);
     }
-    if (PRESSED(B_SEQ))
+    if (PRESSED(B_LFO))
         jungle_auto_roll(st.auto_roll = !st.auto_roll);
-    if (PRESSED(B_HOME) && st.page != PAGE_FACILITY) {   /* the plain break: no variation or warp until K2 / K3 turn again */
+    if (PRESSED(B_HOME) && (btn >> B_EDIT & 1u)) {   /* EDIT + HOME, the plain break: no variation or warp until K2 / K3 turn again */
         st.rhythm = st.warp = 0;
         st.page = PAGE_MAIN;
         jungle_variation(0);
@@ -513,7 +511,7 @@ static void lights(void)
     if (st.frozen)
         btn |= 1u << B_REC;
     if (st.auto_roll)
-        btn |= 1u << B_SEQ;
+        btn |= 1u << B_LFO;
     if (st.page == PAGE_FX)
         btn |= 1u << B_FX;
     if (st.page == PAGE_EQ)
@@ -521,11 +519,9 @@ static void lights(void)
     if (st.page == PAGE_FACILITY)
         btn |= 1u << B_GLO;
     {                                        /* Facility: a track's button lit while it sounds, blinking while it waits */
-        static const uint8_t MUTE_BTN[TRACKS] = {B_HOME, B_LFO, B_ARP, B_SAVE};
+        static const uint8_t MUTE_BTN[TRACKS] = {B_HOME, B_SAVE, B_ARP, B_SEQ};
         unsigned t, blink = plat_ms() / 150u & 1u;
         for (t = 0; t < TRACKS; t++) {
-            if (t == TRK_BREAK && st.page != PAGE_FACILITY)
-                continue;
             if (music_mute_pending(t) ? blink : !music_muted(t))
                 btn |= 1u << MUTE_BTN[t];
         }
@@ -819,7 +815,7 @@ static void draw(void)
         if (st.frozen)
             x = cv_text(x, 28, &FONT_XS, "FREEZE", C_ORANGE) + 10;
         if (st.auto_roll)
-            x = cv_text(x, 28, &FONT_XS, "SEQ FILL", C_GREEN) + 10;
+            x = cv_text(x, 28, &FONT_XS, "AUTO FILL", C_GREEN) + 10;
         if (st.transpose) {
             int_text(st.transpose, t);
             x = cv_text(x, 28, &FONT_XS, "TRANSPOSE", C_GRAY) + 4;

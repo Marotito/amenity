@@ -15,7 +15,7 @@ tap FX
 turn K3 25
 tap FX
 turn ALGO -3
-tap SEQ
+tap LFO
 wait 1200
 shot 03-knobs.png
 # PRESET: the next break while it plays (from its next hit), and the one after; SEL + PRESET: the tempo
