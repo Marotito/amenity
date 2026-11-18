@@ -118,6 +118,9 @@ void jungle_auto_roll(unsigned on);
 /* Facility's form: the next phrase ends with this white key's roll, `length` steps before its end, SEQ's fills on
  * or off (asked before the phrase starts: its pattern and fill are chosen then). */
 void jungle_request_fill(unsigned key, unsigned length);
+/* Amenity+ F5: the pattern's odd 16ths late by this many ticks (0..24 of a 16th's 48: 0 straight, 24 the 75% swing);
+ * from the next 16th. Rolls and one-shots stay on the grid. */
+void jungle_swing(unsigned ticks);
 /* Freeze keeps the current pattern instead of generating a new one. */
 void jungle_freeze(unsigned on);
 /* Replace the pattern with the straight break at the next step. */

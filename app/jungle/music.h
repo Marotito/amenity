@@ -55,7 +55,13 @@ void music_mel_sound(unsigned sound);
 void music_mel_seed(unsigned seed);                          /* MAUTO (the style's) or one of music_seeds() */
 unsigned music_seeds(void);
 const char *music_seed_name(unsigned seed);
-void music_snares(uint32_t slices);                          /* the break's snare slices (its one-shots'): the melody avoids them */
+void music_snares(uint32_t slices);
+/* the groove (F5): the swing (50..75 %, else AUTO: the style's), HUMAN (0..100, else AUTO), a track's swing (50..75,
+ * else AUTO: as the BASE; the break's own, with jungle_swing), a track's accents (0..127, 64 the style's map) */
+void music_swing(unsigned pct);
+void music_human(unsigned v);
+void music_track_swing(unsigned track, unsigned pct);
+void music_accent(unsigned track, unsigned v127);                          /* the break's snare slices (its one-shots'): the melody avoids them */
 void music_root(unsigned pc);       /* the key: the feedback's root (FX + key), from the next progression */
 void music_stress(int on);          /* CPU test: every voice held, every track heard */
 /* the slots (F3): the generator's seed from the next 4-bar block (with the form: a new song from it), the seed of
@@ -77,6 +83,7 @@ struct music_view {
     uint8_t form;                            /* 0 OFF, 1 ON, 2 ON + BREAK */
     const char *section;                     /* the section sounding (form on) */
     uint8_t sect_bar, sect_bars;             /* its bar (1..) and its length, in the style's bars */
+    uint8_t swing[TRACKS], human;            /* the groove playing (AUTO resolved): %, 0..100 */
 };
 void music_view(struct music_view *v);
 const char *music_style_name(unsigned style);

@@ -449,6 +449,8 @@ void jungle_stretch_grain(unsigned piece_ms, unsigned fade_tenths)
 void jungle_filter_resonance(unsigned q_tenths) { ctl_filter_damp = (int32_t)(163840U / (q_tenths < 5U ? 5U : q_tenths > 30U ? 30U : q_tenths)); }
 unsigned jungle_filter_hz(unsigned value) { return filter_hz[value > 127U ? 127U : value]; }
 void jungle_auto_roll(unsigned on) { ctl_auto = on ? 1U : 0U; }
+static volatile uint8_t ctl_swing;   /* Amenity+ F5 */
+void jungle_swing(unsigned ticks) { ctl_swing = (uint8_t)(ticks > JUNGLE_TICKS / 2 ? JUNGLE_TICKS / 2 : ticks); }
 void jungle_freeze(unsigned on) { ctl_freeze = on ? 1U : 0U; }
 void jungle_straight(void) { ctl_straight = (uint8_t)(ctl_straight + 1U); }
 void jungle_roll(unsigned key)
@@ -679,7 +681,11 @@ static JUNGLE_AUDIO_CODE void on_tick(void)
         view_step = (int8_t)step;
     }
 
-    unsigned seq_fire = offset == 0;
+    /* Amenity+ F5: the swing, read as the 16th starts (a change never skips nor doubles a hit): an odd 16th's hit
+     * comes swing_now ticks late; with 0 the pattern plays as it always has */
+    static uint8_t swing_now;
+    if (offset == 0) swing_now = ctl_swing;
+    unsigned seq_fire = offset == ((step & 1U) ? swing_now : 0U);
     const struct jungle_step *s = &steps[step];
 
     /* Manual rolls win over auto-rolls. A new roll waits for the next 16th

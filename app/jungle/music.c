@@ -172,6 +172,18 @@ static const struct form FORM[MSTYLES][2] = {
  * 7 1/8 SHRINK, 8 1/16 REPEAT) */
 static const uint8_t STYLE_FILL[MSTYLES] = { 7, 0, 1, 4, 3 };
 
+/* ------------------------------------------------------------ the groove's data --- */
+/* F5 (Marote, 18 nov): each style's swing (MPC's way: the second 16th of each 8th, at that % of the 8th), its HUMAN
+ * (a middle value: how loose the hands), its strum (the rhythm layer's chord, voice after voice, ms at full HUMAN)
+ * and its accents: a bar of 16ths, the loudness of a note on each (the downbeats, the backbeat, the ghosts). */
+static const struct { uint8_t swing, human; float strum_ms; float acc[16]; } GROOVE[MSTYLES] = {
+    { 50, 30, 2.0f, { 1.10f, .62f, .80f, .62f, 1.00f, .62f, .80f, .62f, 1.05f, .62f, .80f, .62f, 1.00f, .62f, .82f, .70f } },
+    { 64, 70, 9.0f, { .90f, .55f, .95f, .55f, 1.10f, .55f, .95f, .55f, .90f, .55f, .95f, .55f, 1.10f, .55f, 1.0f, .60f } },
+    { 54, 25, 0.0f, { 1.10f, .72f, .90f, .72f, 1.00f, .72f, .90f, .72f, 1.05f, .72f, .90f, .72f, 1.00f, .72f, .92f, .78f } },
+    { 58, 60, 5.0f, { 1.10f, .50f, .72f, .55f, 1.05f, .50f, .78f, .55f, 1.00f, .50f, .72f, .60f, 1.05f, .50f, .85f, .62f } },
+    { 56, 50, 4.0f, { .85f, .55f, .72f, .55f, 1.10f, .55f, .78f, .55f, .95f, .55f, .72f, .55f, 1.10f, .55f, .78f, .62f } },
+};
+
 /* ---------------------------------------------------------------- the controls --- */
 static volatile uint8_t c_style = MSTYLE_BREAKCORE, c_prog = MAUTO, c_stress;
 static volatile uint8_t c_tstyle[TRACKS] = { MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE };
@@ -235,6 +247,14 @@ void music_root(unsigned pc) { c_root = (int8_t)(pc % 12u); }
 void music_stress(int on) { c_stress = (uint8_t)!!on; }
 static volatile uint32_t c_seed, song_seed, blocks;
 static volatile uint8_t c_seed_set, block_left = 64;
+/* the groove (F5): the swing (50..75 %, MAUTO the style's), HUMAN (0..100, MAUTO the style's), each track's swing
+ * (MAUTO: as the BASE's), each track's accents (1: the style's map as written, 0 flat, 2 doubled) */
+static volatile uint8_t c_swing = MAUTO, c_human = MAUTO, c_tswing[TRACKS] = { 50, MAUTO, MAUTO, MAUTO };
+static volatile float c_acc[TRACKS] = { 1.0f, 1.0f, 1.0f, 1.0f };
+void music_swing(unsigned v) { c_swing = (uint8_t)(v >= 50u && v <= 75u ? v : MAUTO); }
+void music_human(unsigned v) { c_human = (uint8_t)(v <= 100u ? v : MAUTO); }
+void music_track_swing(unsigned t, unsigned v) { if (t < TRACKS) c_tswing[t] = (uint8_t)(v >= 50u && v <= 75u ? v : MAUTO); }
+void music_accent(unsigned t, unsigned v) { if (t < TRACKS) c_acc[t] = (float)v * (1.0f / 64.0f); }
 void music_seed(uint32_t seed) { c_seed = seed; c_seed_set = 1; }
 uint32_t music_song_seed(void) { return song_seed; }
 unsigned music_block_left(void) { return block_left; }
@@ -287,6 +307,28 @@ static uint8_t speed_for(float centre)   /* half, normal or double: the one near
     return 2;
 }
 static uint8_t track_style(int t) { return c_tstyle[t] == MSTYLE_BASE ? base_style : c_tstyle[t]; }
+/* the groove: a random of its own (the music's rng stays the song's: a slot's seed plays the same song) */
+static uint32_t hrng = 0x9e3779b9u;
+static float hrand(void) { hrng = hrng * 1664525u + 1013904223u; return (float)((hrng >> 8) & 0xffffu) * (1.0f / 65536.0f); }
+static unsigned swing_pct(int t)   /* the swing a track plays: its own, the BASE's, or its style's */
+{
+    unsigned p = c_tswing[t];
+    if (p == MAUTO) p = c_swing != MAUTO ? c_swing : GROOVE[track_style(t)].swing;
+    return p;
+}
+static float swing_of(int t) { return (float)swing_pct(t) * 0.02f - 1.0f; }   /* an odd 16th's lateness, in 16ths: 0 .. 0.5 */
+static float human_of(int t) { return (float)(c_human == MAUTO ? GROOVE[track_style(t)].human : c_human) * 0.01f; }
+static float acc_now[TRACKS] = { 1.0f, 1.0f, 1.0f, 1.0f };   /* the accent of the 16th a track plays now */
+static float note_vel(int t)   /* a note's loudness: its 16th's accent, a hand's unevenness */
+{
+    float v = acc_now[t] * (1.0f + human_of(t) * 0.16f * (2.0f * hrand() - 1.0f));
+    return v < 0.2f ? 0.2f : v > 1.25f ? 1.25f : v;
+}
+static float gate_mul(int t, float vel)   /* louder notes held a little longer, ghosts shorter, a hand's unevenness */
+{
+    float m = 1.0f + 0.45f * (vel - 0.9f) + human_of(t) * 0.12f * (2.0f * hrand() - 1.0f);
+    return m < 0.7f ? 0.7f : m > 1.15f ? 1.15f : m;
+}
 /* the form: the song (a form of the style's, its three progressions), the section sounding */
 static uint8_t form_on, song_var, sec_i, sec_prog[3], song_req = 1;
 static uint32_t sec_start, sec_len;                 /* half-16ths of the BASE */
@@ -334,9 +376,9 @@ static void cycle_start(void)
 
 /* --------------------------------------------------------------- the bass --- */
 static struct {
-    int mode; float ph[3], freq, target, env, fenv, gate_left, glide, acc; struct svf f; int on, rising;
+    int mode; float ph[3], freq, target, env, fenv, gate_left, glide, acc, vel; struct svf f; int on, rising;
 } bass;
-static void bass_play(int midi, float gate_samples, int slide, int accent)
+static void bass_play(int midi, float gate_samples, int slide, int accent, float vel)
 {
     bass.target = mtof((float)midi);
     if (slide && bass.on && bass.gate_left > 0) {        /* a slide: no new attack, the pitch glides there */
@@ -349,6 +391,7 @@ static void bass_play(int midi, float gate_samples, int slide, int accent)
     bass.glide = 0.0015f;
     bass.fenv = 1.0f;
     bass.acc = accent ? 1.0f : 0.72f;
+    bass.vel = vel;
     bass.on = 1;
     bass.rising = 1;
     bass.gate_left = gate_samples;
@@ -374,12 +417,12 @@ static float bass_render(void)
     if (bass.gate_left > 0) bass.gate_left -= 1.0f;
     else bass.env *= bass.mode == MTIMBRE_ACID ? 0.9975f : bass.mode == MTIMBRE_SUB ? 0.9985f : 0.9992f;
     if (bass.env < 1e-4f) { bass.on = 0; bass.env = 0; }
-    return soft(1.6f * s) * bass.env * bass.acc;
+    return soft(1.6f * s) * bass.env * bass.acc * bass.vel;
 }
 
 /* ------------------------------------------------------- a 3-voice layer --- */
 enum { T_STRINGS, T_ORGAN, T_STAB };
-struct voice { float ph[4], freq, env, fenv, vel; int stage, gate; struct svf f; };
+struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate; struct svf f; };
 struct layer {
     struct voice v[3]; int voicing[3], lo, hi;
     int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0, dec0, rel0;
@@ -416,10 +459,12 @@ static void voice_lead(struct layer *L, const int pcs[3])   /* each voice: its c
 }
 static const int TRIAD[3] = { 0, 1, 2 }, COLOUR[3] = { 1, 2, 3 };
 static void layer_chord(struct layer *L, const struct chord *c, const int idx[3], int octave_up, float vel,
-                        int gate_steps, int legato)
+                        int gate_steps, int legato, float strum)   /* strum: samples between voices, up or down */
 {
     int pcs[3] = { chord_pc(c, idx[0]), chord_pc(c, idx[1]), chord_pc(c, idx[2]) };
+    static int down;
     voice_lead(L, pcs);
+    down ^= 1;
     for (int v = 0; v < 3; ++v) {
         struct voice *h = &L->v[v];
         h->freq = mtof((float)(L->voicing[v] + 12 * octave_up));
@@ -427,6 +472,13 @@ static void layer_chord(struct layer *L, const struct chord *c, const int idx[3]
         h->fenv = 1.0f;
         h->vel = vel;
         h->gate = gate_steps;
+        h->wait = 0.0f;
+        if (strum > 0.0f && !legato) {   /* in pitch order, up or down; each voice a little apart in loudness too */
+            int rank = 0;
+            for (int o = 0; o < 3; ++o) if (L->voicing[o] < L->voicing[v]) ++rank;
+            h->wait = strum * (float)(down ? 2 - rank : rank);
+            h->vel = vel * (0.9f + 0.2f * hrand());
+        }
     }
 }
 static void layer_release(struct layer *L)
@@ -442,6 +494,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
     for (int v = 0; v < 3; ++v) {
         struct voice *h = &L->v[v];
         if (!h->stage) continue;
+        if (h->wait > 0.0f) { h->wait -= 1.0f; continue; }   /* a strummed voice not yet struck */
         if (h->stage == 1) { h->env += (1.05f - h->env) * L->ca; if (h->env >= 1.0f) { h->env = 1.0f; h->stage = 2; } }
         else if (h->stage == 2) h->env += (L->sus - h->env) * L->cd;
         else { h->env -= h->env * L->cr; if (h->env < 1e-4f) { h->stage = 0; continue; } }
@@ -450,11 +503,11 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
             s = 0.55f * sine(h->ph[0]) + 0.4f * sine(h->ph[1]) + 0.3f * sine(h->ph[2]) + 0.25f * sine(h->ph[3]);
             h->ph[0] += inc; h->ph[1] += inc * 2.0f; h->ph[2] += inc * 3.0f; h->ph[3] += inc * 4.0f;
             for (int k = 0; k < 4; ++k) if (h->ph[k] >= 1.0f) h->ph[k] -= 1.0f;
-            s += 0.35f * h->fenv * sine(h->ph[3] * 2.0f);
+            s += 0.35f * h->fenv * h->vel * sine(h->ph[3] * 2.0f);   /* the click: harder on an accent */
             h->fenv *= 0.9985f;
         } else {
             s = 0.5f * (saw(&h->ph[0], inc * 1.0035f) + saw(&h->ph[1], inc * 0.9965f));
-            float g2 = L->timbre == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv) * h_bright * fbright);
+            float g2 = L->timbre == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv * h->vel) * h_bright * fbright);
             s = svf_lp(&h->f, s, g2, L->k);
             h->fenv *= 0.9992f;
         }
@@ -470,6 +523,7 @@ enum { R_REST, R_SKANK, R_BUBBLE, R_STABS };
 static struct { float wait; int octave; float vel; int gate; int live; const struct chord *c; } pend[8];
 static void schedule(float delay, int octave, float vel, int gate, const struct chord *c)   /* c: a chord ahead, or 0 */
 {
+    vel *= note_vel(TRK_HARMONY);
     for (int i = 0; i < 8; ++i) if (!pend[i].live) {
         pend[i].wait = delay; pend[i].octave = octave; pend[i].vel = vel; pend[i].gate = gate;
         pend[i].live = 1; pend[i].c = c;
@@ -480,7 +534,8 @@ static void pend_tick(void)
 {
     for (int i = 0; i < 8; ++i) if (pend[i].live && (pend[i].wait -= 1.0f) <= 0.0f) {
         pend[i].live = 0;
-        layer_chord(&rhy, pend[i].c ? pend[i].c : cur_chord, TRIAD, pend[i].octave, pend[i].vel, pend[i].gate, 0);
+        float strum = GROOVE[track_style(TRK_HARMONY)].strum_ms * human_of(TRK_HARMONY) * (0.6f + 0.4f * hrand()) * (SR * 0.001f);
+        layer_chord(&rhy, pend[i].c ? pend[i].c : cur_chord, TRIAD, pend[i].octave, pend[i].vel, pend[i].gate, 0, strum);
     }
 }
 static void rhythm_set(int r)
@@ -639,7 +694,7 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
         rhythm_on = 0;
         pad_on = 1;
         rhythm_set(R_STABS); rhy.sus = 0.5f;
-        layer_chord(&rhy, cur_chord, TRIAD, 1, 0.6f, 0, 1);
+        layer_chord(&rhy, cur_chord, TRIAD, 1, 0.6f, 0, 1, 0.0f);
         return;
     }
     rhythm_on = harm_mode_now != MHARM_PAD && !(form_on && harm_mode_now == MAUTO && sect()->harm == H_PAD);
@@ -651,7 +706,7 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
     else if (harm_mode_now != MAUTO) pad_on = 0;
     else if (form_on && sect()->harm != H_RHY) pad_on = 1;   /* the section's pad */
     else if (--pad_left <= 0) { pad_on = rnd(100) < S->pad_pct; pad_left = 2 + (int)rnd(3); }   /* AUTO: a few phrases */
-    if (pad_on) layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 1);
+    if (pad_on) layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 1, 0.0f);
     else layer_release(&pad);
 }
 
@@ -820,7 +875,8 @@ static void bass_step(int v)
         if (e->slide) { int j = v + 1; while (j < 32 && !bseq[j].on) ++j; len = j - v + 1; }
         slide = v > 0 && bseq[v - 1].slide && bseq[v - 1].on;
     }
-    bass_play(bev_note(e, v), (float)len * vsps(TRK_BASS) * (len == 1 ? 0.55f : 0.92f), slide, e->acc);
+    float vel = note_vel(TRK_BASS);
+    bass_play(bev_note(e, v), (float)len * vsps(TRK_BASS) * (len == 1 ? 0.55f : 0.92f) * gate_mul(TRK_BASS, vel), slide, e->acc, vel);
 }
 
 /* ------------------------------------------------------------- the melody --- */
@@ -897,16 +953,16 @@ static float lead_render(void)
         switch (snd) {
         case MMSOUND_SAW:
             s = 0.5f * (saw(&lead.ph[0], inc * 1.003f) + saw(&lead.ph[1], inc * 0.997f));
-            s = svf_lp(&lead.f, s, g_of((700.0f + 3500.0f * lead.fenv) * m_bright), 0.8f);
+            s = svf_lp(&lead.f, s, g_of((700.0f + 3500.0f * lead.fenv * lead.vel) * m_bright), 0.8f);
             break;
         case MMSOUND_SQUARE: case MMSOUND_REED:   /* a pulse: two saws apart (square: half, reed: a quarter) */
             s = saw(&lead.ph[0], inc) - saw(&lead.ph[1], inc);
-            s = snd == MMSOUND_SQUARE ? svf_lp(&lead.f, s, g_of((500.0f + 4000.0f * lead.fenv) * m_bright), 0.45f)
+            s = snd == MMSOUND_SQUARE ? svf_lp(&lead.f, s, g_of((500.0f + 4000.0f * lead.fenv * lead.vel) * m_bright), 0.45f)
                                       : svf_lp(&lead.f, s, g_of(1600.0f * m_bright), 0.5f) * 0.8f;
             break;
         case MMSOUND_FM: {   /* two operators: a bell (3.5:1), the index dying away */
             lead.ph[1] += inc * 3.5f; if (lead.ph[1] >= 1.0f) lead.ph[1] -= 1.0f;
-            float ph = lead.ph[0] + 0.35f * m_bright * 2.5f * lead.fenv * sine(lead.ph[1]);
+            float ph = lead.ph[0] + 0.35f * m_bright * 2.5f * lead.fenv * (0.5f + 0.5f * lead.vel) * sine(lead.ph[1]);
             ph -= (float)(int)ph; if (ph < 0.0f) ph += 1.0f;
             s = sine(ph);
             lead.ph[0] += inc; if (lead.ph[0] >= 1.0f) lead.ph[0] -= 1.0f;
@@ -1064,7 +1120,8 @@ static void mel_sound(int v)
     if (v % 8 == 0 && e->len >= 2) midi = snap_to_chord(midi);
     while (midi > 86) midi -= 12;
     while (midi < 55) midi += 12;
-    lead_note(midi, (float)e->len * vsps(TRK_MELODY) * 0.9f, e->vel);
+    float vel = e->vel * note_vel(TRK_MELODY);
+    lead_note(midi, (float)e->len * vsps(TRK_MELODY) * 0.9f * gate_mul(TRK_MELODY, vel), vel);
     if (mel_mode_now == MMEL_ANSWER && track_style(TRK_MELODY) == MSTYLE_DUB) { /* dub: the note again, quieter (see render) */ }
 }
 static void mel_step(int v)
@@ -1145,7 +1202,7 @@ static void form_step(void)   /* each 16th of the break, the form playing */
     fbright = trans_down && left <= 32u ? 0.3f + 0.7f * (float)left / 32.0f : 1.0f;
     if (left == 2u && trans_up && !heard_muted[TRK_BASS] && !form_mute[TRK_BASS] && bmode != MBASS_KICK) {
         uint32_t ahead = 2u;   /* the bass's push: a half step under the next root, sliding in */
-        bass_play(root_midi(chord_ahead(ahead)) - 1, 2.0f * sps, 0, 1);
+        bass_play(root_midi(chord_ahead(ahead)) - 1, 2.0f * sps, 0, 1, 1.0f);
     }
 }
 static int form_hole(int t)   /* the harmony's hole before a rise (half a bar), everything's last bar before a drop */
@@ -1160,8 +1217,6 @@ static int form_hole(int t)   /* the harmony's hole before a rise (half a bar), 
 /* ------------------------------------------------------ the tracks' clocks --- */
 /* A track's 16th v (0..31, its phrase) from the break's 16th g: half speed on even g (v = g/2), double twice (2g now,
  * 2g+1 half a 16th later). Aligned on g, so every speed meets on the break's phrases. */
-static float second_wait[TRACKS];
-static uint8_t second_v[TRACKS];
 static void harmony_vstep(int v)
 {
     if (v == 0) harmony_phrase();
@@ -1175,15 +1230,32 @@ static void track_vstep(int t, int v)
     else if (t == TRK_HARMONY) harmony_vstep(v);
     else if (t == TRK_MELODY) mel_step(v);
 }
+/* F5, the groove: a track's odd 16th comes late by its swing (of its own 16th: at half speed the swing of the real
+ * 8ths); then the hands: the harmony a little behind the beat, the melody loose, the bass tight. Each 16th waits
+ * in its track's queue (a double speed's second one too), its accent read as it sounds. */
+static const float ACC_K[TRACKS] = { 0.0f, 0.5f, 1.0f, 0.7f };          /* how much of the accents each track takes */
+static const float LATE_MS[TRACKS] = { 0.0f, 0.0f, 2.5f, 0.0f }, LOOSE_MS[TRACKS] = { 0.0f, 1.5f, 4.5f, 5.0f };
+static struct { float wait; int8_t v; } tq[TRACKS][3];
+static void vstep_go(int t, int v)
+{
+    acc_now[t] = 1.0f + c_acc[t] * ACC_K[t] * (GROOVE[track_style(t)].acc[v % 16] - 1.0f);
+    track_vstep(t, v);
+}
+static void vstep_at(int t, int v, float wait)
+{
+    if (v & 1) wait += swing_of(t) * vsps(t);
+    wait += human_of(t) * (LATE_MS[t] + LOOSE_MS[t] * hrand()) * (SR * 0.001f);
+    if (wait >= 1.0f) for (int i = 0; i < 3; ++i) if (tq[t][i].v < 0) { tq[t][i].v = (int8_t)v; tq[t][i].wait = wait; return; }
+    vstep_go(t, v);
+}
 static void track_tick(int t)
 {
     uint8_t f = feel[t];
-    if (f == 2) track_vstep(t, (int)(g % 32u));
-    else if (f == 1) { if (!(g & 1u)) track_vstep(t, (int)(g / 2u % 32u)); }
+    if (f == 2) vstep_at(t, (int)(g % 32u), 0.0f);
+    else if (f == 1) { if (!(g & 1u)) vstep_at(t, (int)(g / 2u % 32u), 0.0f); }
     else {
-        track_vstep(t, (int)(2u * g % 32u));
-        second_v[t] = (uint8_t)((2u * g + 1u) % 32u);
-        second_wait[t] = sps * 0.5f;
+        vstep_at(t, (int)(2u * g % 32u), 0.0f);
+        vstep_at(t, (int)((2u * g + 1u) % 32u), sps * 0.5f);
     }
 }
 
@@ -1249,9 +1321,10 @@ static void on_step(int step, uint32_t at)
     if (bpos - cyc_start >= prog_len(P(), cyc_speed)) cycle_start();
     {
         const struct chord *c = chord_in(P(), bpos - cyc_start, cyc_speed);
-        if (c != cur_chord) { cur_chord = c; if (pad_on && !form_hole(TRK_HARMONY)) layer_chord(&pad, c, COLOUR, 0, 1.0f, 0, 1); }
+        if (c != cur_chord) { cur_chord = c; if (pad_on && !form_hole(TRK_HARMONY)) layer_chord(&pad, c, COLOUR, 0, 1.0f, 0, 1, 0.0f); }
     }
     if (g % 16u == 0) autodub_bar();
+    jungle_swing((unsigned)(swing_of(TRK_BREAK) * (float)JUNGLE_TICKS + 0.5f));   /* the break's own swing, from its next 16th */
     track_tick(TRK_BASS);
     track_tick(TRK_HARMONY);
     track_tick(TRK_MELODY);
@@ -1265,7 +1338,7 @@ static void on_hit(int slice, int pitch)
     if (bmode != MBASS_KICK || jungle_roll_active() == 1 || !cur_chord) return;
     if (!(kick_mask >> slice & 1u)) return;
     int note = root_midi(cur_chord);
-    bass_play(note < 36 ? note + 12 : note, SR * 0.12f, jungle_roll_active() == 2, 1);
+    bass_play(note < 36 ? note + 12 : note, SR * 0.12f, jungle_roll_active() == 2, 1, 1.0f + human_of(TRK_BASS) * 0.12f * (hrand() - 0.5f));
 }
 
 void music_init(void)
@@ -1277,6 +1350,8 @@ void music_init(void)
     pad.voicing[0] = rhy.voicing[0] = 60; pad.voicing[1] = rhy.voicing[1] = 64; pad.voicing[2] = rhy.voicing[2] = 67;
     rhythm_set(R_SKANK);
     bass.mode = MTIMBRE_REESE;
+    bass.vel = 1.0f;
+    for (int t = 0; t < TRACKS; ++t) for (int i = 0; i < 3; ++i) tq[t][i].v = -1;
     bass_slide = ms_coef(25.0f);
     next_prog_ix = 0;
     cycle_start();
@@ -1301,6 +1376,8 @@ void music_view(struct music_view *v)
     v->mel_sound = mel_sound_now;
     v->mel_seed = mel_seed_now;
     v->form = c_form;
+    for (int t = 0; t < TRACKS; ++t) v->swing[t] = (uint8_t)swing_pct(t);
+    v->human = (uint8_t)(c_human == MAUTO ? GROOVE[base_style].human : c_human);
     v->section = form_on && !song_req ? sect()->name : "";
     v->sect_bar = (uint8_t)(form_on && !song_req ? (bpos - sec_start) / 32u + 1u : 0u);
     v->sect_bars = (uint8_t)(form_on && !song_req ? sec_len / 32u : 0u);
@@ -1329,7 +1406,7 @@ static void render_chunk(int32_t *lr, unsigned n)
             layer_release(&rhy);
             bass.gate_left = 0.0f;
             for (int i = 0; i < 8; ++i) pend[i].live = 0;
-            second_wait[TRK_BASS] = second_wait[TRK_HARMONY] = second_wait[TRK_MELODY] = 0.0f;
+            for (int t = 0; t < TRACKS; ++t) for (int i = 0; i < 3; ++i) tq[t][i].v = -1;
             if (lead.stage) lead.stage = 3;
             mel_pending = -1;
         }
@@ -1349,8 +1426,9 @@ static void render_chunk(int32_t *lr, unsigned n)
             ++e;
         }
         if (mel_pending >= 0 && (mel_delay -= 1.0f) <= 0.0f) { mel_sound(mel_pending); mel_pending = -1; }
-        for (int t = TRK_BASS; t <= TRK_MELODY; ++t)   /* a double-speed track's second 16th */
-            if (second_wait[t] > 0.0f && (second_wait[t] -= 1.0f) <= 0.0f) track_vstep(t, second_v[t]);
+        for (int t = TRK_BASS; t <= TRK_MELODY; ++t)   /* the 16ths waiting: swung, late, a double speed's second */
+            for (int q = 0; q < 3; ++q)
+                if (tq[t][q].v >= 0 && (tq[t][q].wait -= 1.0f) <= 0.0f) { int v = tq[t][q].v; tq[t][q].v = -1; vstep_go(t, v); }
         pend_tick();
         float l = 0.0f, r = 0.0f;
         buf_bass[i] = bass_render() * 0.55f;

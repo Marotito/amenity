@@ -19,6 +19,7 @@
 #include "jungle.h"
 #include "jungle_mul.h"
 #include "music.h"                      /* Facility: the tracks beside the break */
+#include <stddef.h>                     /* offsetof: the slots of older kinds */
 
 /* ------------------------------------------------------------------ audio --- */
 /* What the render makes is heard one block later (the I2S buffer's other half): the engine works on that time, so
@@ -117,12 +118,28 @@ static struct {
     uint8_t bass_mode, bass_sound, harm_mode, harm_sound;   /* MAUTO or one */
     uint8_t mel_mode, mel_sound, mel_seed;
     uint8_t param[TRACKS][3];                /* K2..K4 of the bass and the harmony */
+    uint8_t swing, human;                    /* F5, the BASE's groove (SEL + K1, K2): MAUTO or 50..75 %, 0..100 */
+    uint8_t tswing[TRACKS], accent[TRACKS];  /* a track's (SEL + K1, K2): MAUTO (= BASE) or 50..75; 0..127 */
 } fac = {.focus = 1 + TRK_BASS, .level = {100, 100, 100, 100}, .style = MSTYLE_BREAKCORE, .prog = MAUTO,
          .energy = 64, .chords = 64, .autodub = 0,
          .tstyle = {MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE},
          .bass_mode = MAUTO, .bass_sound = MAUTO, .harm_mode = MAUTO, .harm_sound = MAUTO,
          .mel_mode = MAUTO, .mel_sound = MAUTO, .mel_seed = MAUTO,
-         .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 0, 0}}};
+         .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 0, 0}},
+         .swing = MAUTO, .human = MAUTO, .tswing = {50, MAUTO, MAUTO, MAUTO}, .accent = {64, 64, 64, 64}};
+/* F5: a swing turned (AUTO, 50 .. 75 %) and HUMAN (AUTO, 0 .. 100 by 5): a knob, so no wrap */
+static uint8_t swing_turn(uint8_t v, int32_t d)
+{
+    int i = v == MAUTO ? 0 : (int)v - 49;
+    i = clamp(i + (int)d, 0, 26);
+    return (uint8_t)(i == 0 ? (int)MAUTO : i + 49);
+}
+static uint8_t human_turn(uint8_t v, int32_t d)
+{
+    int i = v == MAUTO ? 0 : (int)v / 5 + 1;
+    i = clamp(i + (int)d, 0, 21);
+    return (uint8_t)(i == 0 ? (int)MAUTO : (i - 1) * 5);
+}
 /* a choice with AUTO first: MAUTO, 0, 1 .. n-1, turned d */
 static uint8_t auto_turn(uint8_t v, int32_t d, unsigned n)
 {
@@ -219,7 +236,7 @@ static void select_break(unsigned i)
  * knobs), the mutes, the tempo and the seed (the same music again). In the store object OBJ_SETTINGS with the
  * breaks page's order (user_breaks.c): one write for both. A save while playing waits for the next STOP (a flash
  * write silences the FM-1 for a moment); a load from the next 4-bar block (Marote, 18 nov). */
-enum { SLOTS = 16, SLOT_VERSION = 2 };   /* 2: the melody (F4) */
+enum { SLOTS = 16, SLOT_VERSION = 3 };   /* 2: the melody (F4); 3: the groove (F5) */
 #define SLOTS_MAGIC 0x31534C46u                /* "FLS1" */
 struct slot {
     uint8_t used, ver;
@@ -231,6 +248,7 @@ struct slot {
     uint8_t level[TRACKS], param[TRACKS][3], mutes;
     uint32_t seed;
     uint8_t mel_mode, mel_sound, mel_seed, rsv;   /* v2 */
+    uint8_t swing, human, tswing[TRACKS], accent[TRACKS];   /* v3 */
 };
 static struct slot slots[SLOTS];
 static struct {
@@ -279,9 +297,15 @@ static void settings_load(void)
             unsigned i;
             for (i = 0; i < SLOTS; i++) {        /* a slot of an older, shorter kind: what it has, the rest AUTO */
                 memcpy(&slots[i], in + 8 + i * size, size);
-                if (size < sizeof(struct slot) && slots[i].used) {
+                if (size <= offsetof(struct slot, mel_mode) && slots[i].used) {
                     slots[i].mel_mode = slots[i].mel_sound = slots[i].mel_seed = MAUTO;
                     slots[i].param[TRK_MELODY][0] = 64, slots[i].param[TRK_MELODY][1] = 0, slots[i].param[TRK_MELODY][2] = 0;
+                }
+                if (size <= offsetof(struct slot, swing) && slots[i].used) {   /* before F5: the styles' groove */
+                    unsigned t;
+                    slots[i].swing = slots[i].human = MAUTO;
+                    for (t = 0; t < TRACKS; t++)
+                        slots[i].tswing[t] = t == TRK_BREAK ? 50 : MAUTO, slots[i].accent[t] = 64;
                 }
             }
         }
@@ -355,6 +379,10 @@ static void slot_capture(struct slot *x)
     x->mel_mode = fac.mel_mode;
     x->mel_sound = fac.mel_sound;
     x->mel_seed = fac.mel_seed;
+    x->swing = fac.swing;
+    x->human = fac.human;
+    for (t = 0; t < TRACKS; t++)
+        x->tswing[t] = fac.tswing[t], x->accent[t] = fac.accent[t];
 }
 /* a slot in two steps, so it all lands on the block: the music's part (its style, its tracks, the mutes at the
  * phrase, the seed) a 16th before, the break's (the tempo, the break, its knobs) as the block starts */
@@ -380,7 +408,11 @@ static void slot_apply_music(const struct slot *x, int vary)
         for (k = 0; k < 3u; k++)
             music_param(t, k, fac.param[t][k] = x->param[t][k]);
         music_mute(t, (int)(x->mutes >> t & 1u), jungle_playing());
+        music_track_swing(t, fac.tswing[t] = x->tswing[t]);
+        music_accent(t, fac.accent[t] = x->accent[t]);
     }
+    music_swing(fac.swing = x->swing);
+    music_human(fac.human = x->human);
     {
         uint32_t seed = vary ? (x->seed * 2654435761u) ^ plat_ms() : x->seed;
         music_seed(seed);
@@ -625,6 +657,21 @@ static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
     if (e[EN_SELECT]) {
         fac.focus = (uint8_t)wrap(fac.focus, e[EN_SELECT] > 0 ? 1 : -1, FOCUSES);
         app_say("FOCUS", fac.focus == FOC_BASE ? "BASE" : TRACK_NAME[fac.focus - 1]);
+    }
+    if (sel && (e[EN_K1] || e[EN_K2])) {    /* SEL + K1 / K2: the groove (F5); the knobs' own jobs wait */
+        if (fac.focus == FOC_BASE) {
+            if (e[EN_K1])
+                music_swing(fac.swing = swing_turn(fac.swing, e[EN_K1]));
+            if (e[EN_K2])
+                music_human(fac.human = human_turn(fac.human, e[EN_K2]));
+        } else {
+            f = fac.focus - 1;
+            if (e[EN_K1])
+                music_track_swing((unsigned)f, fac.tswing[f] = swing_turn(fac.tswing[f], e[EN_K1]));
+            if (e[EN_K2] && f != TRK_BREAK)
+                music_accent((unsigned)f, fac.accent[f] = (uint8_t)turn(fac.accent[f], e[EN_K2]));
+        }
+        return;
     }
     if (fac.focus == FOC_BASE) {             /* the BASE: ALGO the style, PRESET the progression, K1..K3 */
         if (e[EN_ALGO]) {
@@ -1027,10 +1074,47 @@ static void facility_base_row(void)
             cv_text(228 - w - text_w(&FONT_XS, t), 9, &FONT_XS, t, C_GRAY);
     }
 }
+/* F5: SEL held, the groove's two knobs where K1 and K2 are (AUTO: the value the style gives, "A:") */
+static void groove_knobs(void)
+{
+    struct music_view mv;
+    char t[16], n[8];
+    unsigned f = fac.focus == FOC_BASE ? TRK_BASS : fac.focus - 1u;
+    uint8_t sw = fac.focus == FOC_BASE ? fac.swing : fac.tswing[f];
+    music_view(&mv);
+    t[0] = 0;
+    if (sw == MAUTO)
+        text_cat(t, fac.focus == FOC_BASE ? "A:" : "=");
+    if (fac.focus != FOC_BASE && sw == MAUTO && fac.swing == MAUTO)
+        t[0] = 0, text_cat(t, "A:");
+    if (mv.swing[f] <= 50u)
+        text_cat(t, "OFF");   /* straight */
+    else {
+        int_text(mv.swing[f], n);
+        text_cat(t, n);
+        text_cat(t, "%");
+    }
+    value(6, 46, "SWING", t, sw == MAUTO ? 0u : (unsigned)(sw - 50u) * 127u / 25u, 0);
+    if (fac.focus == FOC_BASE) {
+        t[0] = 0;
+        if (fac.human == MAUTO)
+            text_cat(t, "A:");
+        int_text(mv.human, n);
+        text_cat(t, n);
+        value(64, 46, "HUMAN", t, (unsigned)mv.human * 127u / 100u, 0);
+    } else if (f != TRK_BREAK) {
+        int_text((int32_t)fac.accent[f] - 64, t);
+        value(64, 46, "ACCENTS", t, fac.accent[f], 1);
+    }
+}
 static void facility_knobs(void)
 {
     char t[16];
     unsigned f;
+    if (ui.btn >> B_SEL & 1u) {
+        groove_knobs();
+        return;
+    }
     if (fac.focus == FOC_BASE) {
         static const char *const SPEED[3] = {"SLOW", "AS IS", "FAST"};
         int_text(fac.energy, t);
@@ -1079,6 +1163,11 @@ static void facility_hint(char *h)
     struct music_view mv;
     unsigned f;
     h[0] = 0;
+    if (ui.btn >> B_SEL & 1u) {              /* F5: what SEL does to K1, K2 */
+        text_cat(h, fac.focus == FOC_BASE ? "SEL: K1 SWING  K2 HUMAN" :
+                    fac.focus - 1u == TRK_BREAK ? "SEL: K1 SWING (BREAK)" : "SEL: K1 SWING  K2 ACCENTS");
+        return;
+    }
     if (fac.focus == FOC_BASE) {
         text_cat(h, "ALGO STYLE  PRESET PROGRESSION");
         return;
