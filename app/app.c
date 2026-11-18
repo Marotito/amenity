@@ -120,13 +120,43 @@ static struct {
     uint8_t param[TRACKS][3];                /* K2..K4 of the bass and the harmony */
     uint8_t swing, human;                    /* F5, the BASE's groove (SEL + K1, K2): MAUTO or 50..75 %, 0..100 */
     uint8_t tswing[TRACKS], accent[TRACKS];  /* a track's (SEL + K1, K2): MAUTO (= BASE) or 50..75; 0..127 */
+    /* F6a, Facility's FX view (FX on its page): the BASE's busses, a track's sends (MAUTO: the style's) */
+    uint8_t fx, etime, efb, ecolor, rtype, rdecay, fxret, thr;
+    uint8_t se[TRACKS], sr[TRACKS], ch[TRACKS], pan[TRACKS];
 } fac = {.focus = 1 + TRK_BASS, .level = {100, 100, 100, 100}, .style = MSTYLE_BREAKCORE, .prog = MAUTO,
          .energy = 64, .chords = 64, .autodub = 0,
          .tstyle = {MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE},
          .bass_mode = MAUTO, .bass_sound = MAUTO, .harm_mode = MAUTO, .harm_sound = MAUTO,
          .mel_mode = MAUTO, .mel_sound = MAUTO, .mel_seed = MAUTO,
          .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 0, 0}},
-         .swing = MAUTO, .human = MAUTO, .tswing = {50, MAUTO, MAUTO, MAUTO}, .accent = {64, 64, 64, 64}};
+         .swing = MAUTO, .human = MAUTO, .tswing = {50, MAUTO, MAUTO, MAUTO}, .accent = {64, 64, 64, 64},
+         .etime = MAUTO, .efb = MAUTO, .ecolor = MAUTO, .rtype = MAUTO, .rdecay = MAUTO, .fxret = MAUTO, .thr = MAUTO,
+         .se = {0, MAUTO, MAUTO, MAUTO}, .sr = {0, MAUTO, MAUTO, MAUTO}, .ch = {0, MAUTO, MAUTO, MAUTO}, .pan = {64, 64, 64, 64}};
+/* F6a: an effect's knob turned: from AUTO it starts at what the style gives */
+static uint8_t fx_turn(uint8_t v, int32_t d, unsigned resolved)
+{
+    return (uint8_t)clamp((int32_t)(v == MAUTO ? resolved : v) + 2 * d, 0, 127);
+}
+/* the echo's time (PRESET): AUTO, 1/8 3/16 1/4 3/8 1/2 (0..4), then free 100 .. 1450 ms (10..37) */
+static uint8_t etime_turn(uint8_t v, int32_t d)
+{
+    int i = v == MAUTO ? 0 : v < 5u ? (int)v + 1 : (int)v - 4;
+    i = clamp(i + (int)d, 0, 33);
+    return (uint8_t)(i == 0 ? (int)MAUTO : i <= 5 ? i - 1 : i + 4);
+}
+static void text_cat(char *d, const char *s);
+static void int_text(int32_t v, char *t);
+static void etime_text(uint8_t v, char *t)
+{
+    static const char *const DIV[5] = {"1/8", "3/16", "1/4", "3/8", "1/2"};
+    t[0] = 0;
+    if (v < 5u)
+        text_cat(t, DIV[v]);
+    else {
+        int_text(((int)v - 10) * 50 + 100, t);
+        text_cat(t, "MS");
+    }
+}
 /* F5: a swing turned (AUTO, 50 .. 75 %) and HUMAN (AUTO, 0 .. 100 by 5): a knob, so no wrap */
 static uint8_t swing_turn(uint8_t v, int32_t d)
 {
@@ -236,7 +266,7 @@ static void select_break(unsigned i)
  * knobs), the mutes, the tempo and the seed (the same music again). In the store object OBJ_SETTINGS with the
  * breaks page's order (user_breaks.c): one write for both. A save while playing waits for the next STOP (a flash
  * write silences the FM-1 for a moment); a load from the next 4-bar block (Marote, 18 nov). */
-enum { SLOTS = 16, SLOT_VERSION = 3 };   /* 2: the melody (F4); 3: the groove (F5) */
+enum { SLOTS = 16, SLOT_VERSION = 4 };   /* 2: the melody (F4); 3: the groove (F5); 4: the effects (F6a) */
 #define SLOTS_MAGIC 0x31534C46u                /* "FLS1" */
 struct slot {
     uint8_t used, ver;
@@ -249,6 +279,8 @@ struct slot {
     uint32_t seed;
     uint8_t mel_mode, mel_sound, mel_seed, rsv;   /* v2 */
     uint8_t swing, human, tswing[TRACKS], accent[TRACKS];   /* v3 */
+    uint8_t etime, efb, ecolor, rtype, rdecay, fxret, thr, rsv4;   /* v4 */
+    uint8_t se[TRACKS], sr[TRACKS], ch[TRACKS], pan[TRACKS];
 };
 static struct slot slots[SLOTS];
 static struct {
@@ -306,6 +338,15 @@ static void settings_load(void)
                     slots[i].swing = slots[i].human = MAUTO;
                     for (t = 0; t < TRACKS; t++)
                         slots[i].tswing[t] = t == TRK_BREAK ? 50 : MAUTO, slots[i].accent[t] = 64;
+                }
+                if (size <= offsetof(struct slot, etime) && slots[i].used) {   /* before F6a: the styles' effects */
+                    unsigned t;
+                    slots[i].etime = slots[i].efb = slots[i].ecolor = slots[i].rtype = MAUTO;
+                    slots[i].rdecay = slots[i].fxret = slots[i].thr = MAUTO;
+                    for (t = 0; t < TRACKS; t++) {
+                        slots[i].se[t] = slots[i].sr[t] = slots[i].ch[t] = t == TRK_BREAK ? 0 : MAUTO;
+                        slots[i].pan[t] = 64;
+                    }
                 }
             }
         }
@@ -383,6 +424,10 @@ static void slot_capture(struct slot *x)
     x->human = fac.human;
     for (t = 0; t < TRACKS; t++)
         x->tswing[t] = fac.tswing[t], x->accent[t] = fac.accent[t];
+    x->etime = fac.etime, x->efb = fac.efb, x->ecolor = fac.ecolor, x->rtype = fac.rtype;
+    x->rdecay = fac.rdecay, x->fxret = fac.fxret, x->thr = fac.thr;
+    for (t = 0; t < TRACKS; t++)
+        x->se[t] = fac.se[t], x->sr[t] = fac.sr[t], x->ch[t] = fac.ch[t], x->pan[t] = fac.pan[t];
 }
 /* a slot in two steps, so it all lands on the block: the music's part (its style, its tracks, the mutes at the
  * phrase, the seed) a 16th before, the break's (the tempo, the break, its knobs) as the block starts */
@@ -413,6 +458,19 @@ static void slot_apply_music(const struct slot *x, int vary)
     }
     music_swing(fac.swing = x->swing);
     music_human(fac.human = x->human);
+    music_fx(MFX_ETIME, fac.etime = x->etime);
+    music_fx(MFX_EFB, fac.efb = x->efb);
+    music_fx(MFX_ECOLOR, fac.ecolor = x->ecolor);
+    music_fx(MFX_RTYPE, fac.rtype = x->rtype);
+    music_fx(MFX_RDECAY, fac.rdecay = x->rdecay);
+    music_fx(MFX_RETURN, fac.fxret = x->fxret);
+    music_fx(MFX_THROW, fac.thr = x->thr);
+    for (t = 0; t < TRACKS; t++) {
+        music_send(t, MSEND_ECHO, fac.se[t] = x->se[t]);
+        music_send(t, MSEND_REVERB, fac.sr[t] = x->sr[t]);
+        music_send(t, MSEND_CHORUS, fac.ch[t] = x->ch[t]);
+        music_send(t, MSEND_PAN, fac.pan[t] = x->pan[t]);
+    }
     {
         uint32_t seed = vary ? (x->seed * 2654435761u) ^ plat_ms() : x->seed;
         music_seed(seed);
@@ -574,8 +632,12 @@ static void buttons_input(uint32_t btn, uint32_t now)
 #define PRESSED(b) (pressed >> (b) & 1u)
     if (PRESSED(B_FX))
         st.fx_used = 0;
-    if ((released >> B_FX & 1u) && !st.fx_used)
-        st.page = st.page == PAGE_FX ? PAGE_MAIN : PAGE_FX;
+    if ((released >> B_FX & 1u) && !st.fx_used) {   /* on Facility's page: its sends (F6a); else the break's effects */
+        if (st.page == PAGE_FACILITY)
+            fac.fx = !fac.fx;
+        else
+            st.page = st.page == PAGE_FX ? PAGE_MAIN : PAGE_FX;
+    }
     if (PRESSED(B_ENV))
         st.env_used = 0;
     if ((released >> B_ENV & 1u) && !st.env_used)   /* a tap: the EQ page; held with a white key: the slots */
@@ -648,6 +710,51 @@ static void buttons_input(uint32_t btn, uint32_t now)
 static unsigned turn(unsigned v, int32_t detents) { return (unsigned)clamp((int32_t)v + 2 * detents, 0, 127); }
 static int wrap(int v, int d, int n) { v = (v + d) % n; return v < 0 ? v + n : v; }
 
+/* F6a, Facility's FX view: on the BASE, ALGO the reverb's type, PRESET the echo's time, K1 the echo's feedback, K2
+ * its colour, K3 the reverb's decay, K4 the returns; on a track, K1 its echo send, K2 its reverb send, K3 its chorus
+ * (the break: its throws), K4 its pan. SEL + a knob: back to AUTO */
+static void facility_fx_encoders(const int32_t *e, int sel)
+{
+    struct music_view mv;
+    unsigned f;
+    music_view(&mv);
+    if (fac.focus == FOC_BASE) {
+        if (e[EN_ALGO]) {
+            static const char *const RT[2] = {"ROOM", "SPRING"};
+            music_fx(MFX_RTYPE, fac.rtype = auto_turn(fac.rtype, e[EN_ALGO], 2));
+            app_say("REVERB", fac.rtype == MAUTO ? "AUTO" : RT[fac.rtype]);
+        }
+        if (e[EN_PRESET]) {
+            char t[12];
+            music_fx(MFX_ETIME, fac.etime = sel ? MAUTO : etime_turn(fac.etime, e[EN_PRESET]));
+            etime_text(fac.etime == MAUTO ? mv.etime : fac.etime, t);
+            app_say(fac.etime == MAUTO ? "ECHO TIME AUTO" : "ECHO TIME", t);
+        }
+        if (e[EN_K1])
+            music_fx(MFX_EFB, fac.efb = sel ? MAUTO : fx_turn(fac.efb, e[EN_K1], mv.efb));
+        if (e[EN_K2])
+            music_fx(MFX_ECOLOR, fac.ecolor = sel ? MAUTO : fx_turn(fac.ecolor, e[EN_K2], mv.ecolor));
+        if (e[EN_K3])
+            music_fx(MFX_RDECAY, fac.rdecay = sel ? MAUTO : fx_turn(fac.rdecay, e[EN_K3], mv.rdecay));
+        if (e[EN_K4])
+            music_fx(MFX_RETURN, fac.fxret = sel ? MAUTO : fx_turn(fac.fxret, e[EN_K4], mv.fxret));
+        return;
+    }
+    f = fac.focus - 1u;
+    if (e[EN_K1])
+        music_send(f, MSEND_ECHO, fac.se[f] = sel ? (f == TRK_BREAK ? 0 : MAUTO) : fx_turn(fac.se[f], e[EN_K1], mv.se[f]));
+    if (e[EN_K2])
+        music_send(f, MSEND_REVERB, fac.sr[f] = sel ? (f == TRK_BREAK ? 0 : MAUTO) : fx_turn(fac.sr[f], e[EN_K2], mv.sr[f]));
+    if (e[EN_K3]) {
+        if (f == TRK_BREAK)
+            music_fx(MFX_THROW, fac.thr = sel ? MAUTO : fx_turn(fac.thr, e[EN_K3], mv.thr));
+        else
+            music_send(f, MSEND_CHORUS, fac.ch[f] = sel ? MAUTO : fx_turn(fac.ch[f], e[EN_K3], mv.ch[f]));
+    }
+    if (e[EN_K4] && f != TRK_BREAK)
+        music_send(f, MSEND_PAN, fac.pan[f] = sel ? 64 : (uint8_t)turn(fac.pan[f], e[EN_K4]));
+}
+
 /* Facility's page: SELECT the focus, ALGO its mode, PRESET its sound, K1 its level; K2..K4 the break's variation,
  * warp and filter (as on the break's page), or the bass's / the harmony's sound */
 static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
@@ -657,6 +764,10 @@ static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
     if (e[EN_SELECT]) {
         fac.focus = (uint8_t)wrap(fac.focus, e[EN_SELECT] > 0 ? 1 : -1, FOCUSES);
         app_say("FOCUS", fac.focus == FOC_BASE ? "BASE" : TRACK_NAME[fac.focus - 1]);
+    }
+    if (fac.fx) {
+        facility_fx_encoders(e, sel);
+        return;
     }
     if (sel && (e[EN_K1] || e[EN_K2])) {    /* SEL + K1 / K2: the groove (F5); the knobs' own jobs wait */
         if (fac.focus == FOC_BASE) {
@@ -841,7 +952,7 @@ static void lights(void)
         btn |= 1u << B_REC;
     if (st.auto_roll)
         btn |= 1u << B_LFO;
-    if (st.page == PAGE_FX)
+    if (st.page == PAGE_FX || (st.page == PAGE_FACILITY && fac.fx))
         btn |= 1u << B_FX;
     if (st.page == PAGE_EQ)
         btn |= 1u << B_ENV;
@@ -1107,10 +1218,57 @@ static void groove_knobs(void)
         value(64, 46, f == TRK_MELODY ? "EXPRESSION" : "ACCENTS", t, fac.accent[f], 1);   /* F5b: the melody's phrase */
     }
 }
+/* F6a: the FX view's knobs ("A:": the style's) */
+static void fx_knob(int32_t x, const char *label, uint8_t v, uint8_t resolved)
+{
+    char t[12];
+    t[0] = 0;
+    if (v == MAUTO)
+        text_cat(t, "A:");
+    int_text(resolved, t + (v == MAUTO ? 2 : 0));
+    value(x, 46, label, t, resolved, 0);
+}
+static void fx_knobs(void)
+{
+    struct music_view mv;
+    unsigned f;
+    music_view(&mv);
+    if (fac.focus == FOC_BASE) {
+        fx_knob(6, "FEEDBACK", fac.efb, mv.efb);
+        fx_knob(64, "COLOR", fac.ecolor, mv.ecolor);
+        fx_knob(122, "DECAY", fac.rdecay, mv.rdecay);
+        fx_knob(180, "RETURN", fac.fxret, mv.fxret);
+        return;
+    }
+    f = fac.focus - 1u;
+    fx_knob(6, "ECHO", fac.se[f], mv.se[f]);
+    fx_knob(64, "REVERB", fac.sr[f], mv.sr[f]);
+    if (f == TRK_BREAK) {
+        fx_knob(122, "THROWS", fac.thr, mv.thr);
+        return;
+    }
+    fx_knob(122, "CHORUS", fac.ch[f], mv.ch[f]);
+    {
+        char t[8];
+        int p = (int)fac.pan[f] - 64;
+        t[0] = 0;
+        if (p == 0)
+            text_cat(t, "C");
+        else {
+            text_cat(t, p < 0 ? "L" : "R");
+            int_text(p < 0 ? -p : p, t + 1);
+        }
+        value(180, 46, "PAN", t, fac.pan[f], 1);
+    }
+}
 static void facility_knobs(void)
 {
     char t[16];
     unsigned f;
+    if (fac.fx) {
+        fx_knobs();
+        return;
+    }
     if (ui.btn >> B_SEL & 1u) {
         groove_knobs();
         return;
@@ -1163,6 +1321,25 @@ static void facility_hint(char *h)
     struct music_view mv;
     unsigned f;
     h[0] = 0;
+    if (fac.fx) {                            /* F6a: the FX view */
+        if (fac.focus == FOC_BASE) {
+            struct music_view mv;
+            char t[12];
+            static const char *const RT[2] = {"ROOM", "SPRING"};
+            music_view(&mv);
+            text_cat(h, "ECHO ");
+            if (fac.etime == MAUTO)
+                text_cat(h, "A:");
+            etime_text(mv.etime, t);
+            text_cat(h, t);
+            text_cat(h, "  REVERB ");
+            if (fac.rtype == MAUTO)
+                text_cat(h, "A:");
+            text_cat(h, RT[mv.rtype & 1u]);
+        } else
+            text_cat(h, "FX: SEL+KNOB = AUTO  FX = BACK");
+        return;
+    }
     if (ui.btn >> B_SEL & 1u) {              /* F5: what SEL does to K1, K2 */
         text_cat(h, fac.focus == FOC_BASE ? "SEL: K1 SWING  K2 HUMAN" :
                     fac.focus - 1u == TRK_BREAK ? "SEL: K1 SWING (BREAK)" :

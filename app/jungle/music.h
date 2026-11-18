@@ -61,7 +61,14 @@ void music_snares(uint32_t slices);
 void music_swing(unsigned pct);
 void music_human(unsigned v);
 void music_track_swing(unsigned track, unsigned pct);
-void music_accent(unsigned track, unsigned v127);                          /* the break's snare slices (its one-shots'): the melody avoids them */
+void music_accent(unsigned track, unsigned v127);
+/* the effects (F6a): the BASE's busses (MAUTO: the style's; the echo's time 0..4 = 1/8 3/16 1/4 3/8 1/2, 10.. free:
+ * 100 ms + 50 a step; the reverb's type 0 ROOM 1 SPRING; the rest 0..127), and each track's sends (MAUTO: its
+ * style's; the break's start at 0), its chorus and its pan (64 the centre) */
+enum { MFX_ETIME, MFX_EFB, MFX_ECOLOR, MFX_RTYPE, MFX_RDECAY, MFX_RETURN, MFX_THROW };
+enum { MSEND_ECHO, MSEND_REVERB, MSEND_CHORUS, MSEND_PAN };
+void music_fx(unsigned what, unsigned v);
+void music_send(unsigned track, unsigned what, unsigned v);                          /* the break's snare slices (its one-shots'): the melody avoids them */
 void music_root(unsigned pc);       /* the key: the feedback's root (FX + key), from the next progression */
 void music_stress(int on);          /* CPU test: every voice held, every track heard */
 /* the slots (F3): the generator's seed from the next 4-bar block (with the form: a new song from it), the seed of
@@ -84,6 +91,8 @@ struct music_view {
     const char *section;                     /* the section sounding (form on) */
     uint8_t sect_bar, sect_bars;             /* its bar (1..) and its length, in the style's bars */
     uint8_t swing[TRACKS], human;            /* the groove playing (AUTO resolved): %, 0..100 */
+    uint8_t etime, efb, ecolor, rtype, rdecay, fxret, thr;   /* the effects (AUTO resolved) */
+    uint8_t se[TRACKS], sr[TRACKS], ch[TRACKS];
 };
 void music_view(struct music_view *v);
 const char *music_style_name(unsigned style);
