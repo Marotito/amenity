@@ -1104,7 +1104,7 @@ static void groove_knobs(void)
         value(64, 46, "HUMAN", t, (unsigned)mv.human * 127u / 100u, 0);
     } else if (f != TRK_BREAK) {
         int_text((int32_t)fac.accent[f] - 64, t);
-        value(64, 46, "ACCENTS", t, fac.accent[f], 1);
+        value(64, 46, f == TRK_MELODY ? "EXPRESSION" : "ACCENTS", t, fac.accent[f], 1);   /* F5b: the melody's phrase */
     }
 }
 static void facility_knobs(void)
@@ -1165,7 +1165,8 @@ static void facility_hint(char *h)
     h[0] = 0;
     if (ui.btn >> B_SEL & 1u) {              /* F5: what SEL does to K1, K2 */
         text_cat(h, fac.focus == FOC_BASE ? "SEL: K1 SWING  K2 HUMAN" :
-                    fac.focus - 1u == TRK_BREAK ? "SEL: K1 SWING (BREAK)" : "SEL: K1 SWING  K2 ACCENTS");
+                    fac.focus - 1u == TRK_BREAK ? "SEL: K1 SWING (BREAK)" :
+                    fac.focus - 1u == TRK_MELODY ? "SEL: K1 SWING  K2 EXPRESSION" : "SEL: K1 SWING  K2 ACCENTS");
         return;
     }
     if (fac.focus == FOC_BASE) {

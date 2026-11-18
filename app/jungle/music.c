@@ -1111,31 +1111,106 @@ static void mel_plan(void)   /* the melody track's own phrase starts */
     }
     }
 }
-static float mel_delay;   /* a note moved off a snare: when it sounds */
-static int mel_pending = -1;
-static void mel_sound(int v)
+/* F5b, the melody's expression (Marote, 18 nov): not noise but the phrase, as a player shapes it. From KTH's
+ * performance rules (Friberg: melodic and harmonic charge, phrase arch, duration contrast, high loud, faster uphill,
+ * leap articulation, punctuation) and the jazz studies (a soloist's downbeats late, its offbeats with the band, its
+ * swing less than the band's and evener as the notes get quick: Friberg & Sundstrom, Nelias et al. 2022). Random
+ * timing is left out (Datseris et al. 2019: it adds no swing; too much takes it away); a hand's drift in loudness,
+ * slow, stays. Acid and breakcore: on the grid, the phrase's dynamics only (Marote). A note on the break's snare is
+ * not moved: it is played softer (the jungle producers' ducking). */
+static const struct { float solo_sw, down_ms, end_ms; } MEXP[MSTYLES] = {
+    { 0.0f, 0.0f, 0.0f },     /* breakcore: the grid */
+    { 0.6f, 15.0f, 15.0f },   /* jazz: downbeats 15 ms late (the cautious value, Marote) */
+    { 1.0f, 0.0f, 0.0f },     /* acid: with the machine */
+    { 0.5f, 8.0f, 10.0f },    /* hip hop */
+    { 0.7f, 10.0f, 15.0f },   /* dub */
+};
+static float mx_vel[32], mx_gate[32], m_drift;
+static int8_t mx_end[32];
+static int m_tension;   /* the last note was a tension: a step to a chord tone resolves it */
+static float mel_expr(void)   /* how much expression: the knob (SEL + K2), HUMAN against the style's own */
 {
-    const struct mev *e = &mseq[v];
+    float base = (float)GROOVE[track_style(TRK_MELODY)].human * 0.01f;
+    float e = c_acc[TRK_MELODY] * (base > 0.0f ? human_of(TRK_MELODY) / base : 1.0f);
+    return e > 2.0f ? 2.0f : e;
+}
+static void mel_shape(void)   /* the phrase planned: each note's loudness and length, from the phrase */
+{
+    int vs[32], pc[32], n = 0, top = 0, lo = 999, hi = -999;
+    float E = mel_expr();
+    for (int v = 0; v < 32; ++v) { mx_vel[v] = mx_gate[v] = 1.0f; mx_end[v] = 0; }
+    for (int v = 0; v < 32; ++v) if (mseq[v].on) { vs[n] = v; pc[n] = deg_pitch(mseq[v].deg, mseq[v].alt); ++n; }
+    if (!n) return;
+    for (int i = 0; i < n; ++i) { if (pc[i] > pc[top]) top = i; if (pc[i] < lo) lo = pc[i]; if (pc[i] > hi) hi = pc[i]; }
+    float mid = 0.5f * (float)(lo + hi);
+    for (int i = 0; i < n; ++i) {
+        int v = vs[i];
+        float vel = 1.0f, gate = 1.0f;
+        /* the arch: up to the phrase's highest note, then down to its end */
+        if (i <= top) vel *= 0.9f + 0.15f * (top ? (float)i / (float)top : 1.0f);
+        else vel *= 1.05f - 0.2f * (float)(i - top) / (float)(n - top);
+        vel *= 1.0f + 0.008f * ((float)pc[i] - mid);                                     /* high loud */
+        if (mseq[v].len <= 1) { vel *= 0.92f; gate *= 0.9f; } else if (mseq[v].len >= 4) vel *= 1.03f;   /* duration contrast */
+        if (i > 0 && i + 1 < n && pc[i - 1] < pc[i] && pc[i] < pc[i + 1]) gate *= 0.92f;  /* faster uphill */
+        if (i + 1 < n && iabs(pc[i + 1] - pc[i]) >= 5) gate *= 0.85f;                    /* a leap: a breath before */
+        if (i + 1 < n && vs[i + 1] > v + mseq[v].len) gate *= 0.9f;                       /* a motif's end */
+        m_drift = 0.8f * m_drift + 0.2f * (2.0f * hrand() - 1.0f);                       /* a hand: slow */
+        vel *= 1.0f + 0.04f * m_drift;
+        mx_vel[v] = 1.0f + E * (vel - 1.0f);
+        mx_gate[v] = 1.0f + E * (gate - 1.0f);
+    }
+    mx_end[vs[n - 1]] = 1;
+}
+static float mel_late(int v)   /* how late a note sounds after its 16th: the soloist's swing, the downbeat, the close */
+{
+    const int st = track_style(TRK_MELODY);
+    float d = 0.0f, ms16 = vsps(TRK_MELODY) * (1000.0f / SR), E = mel_expr();
+    if (v & 1) {
+        float sw = swing_of(TRK_MELODY);
+        if (c_tswing[TRK_MELODY] == MAUTO) sw *= MEXP[st].solo_sw;            /* a soloist swings less than the band */
+        float quick = (ms16 - 55.0f) * (1.0f / 45.0f);                        /* and evener as the notes get quick */
+        sw *= quick < 0.0f ? 0.0f : quick > 1.0f ? 1.0f : quick;
+        if (mseq[v].len <= 1 && v > 0 && mseq[v - 1].on && mseq[v - 1].len <= 1) sw *= 0.5f;   /* a run: evener still */
+        d += sw * vsps(TRK_MELODY);
+    }
+    if (v % 4 == 0) d += MEXP[st].down_ms * E * (SR * 0.001f);               /* the downbeat, laid back */
+    if (mx_end[v]) d += MEXP[st].end_ms * E * (SR * 0.001f);                 /* the close, a breath late */
+    return d;
+}
+static struct { struct mev e; int v, duck; float wait; } mpend = { { 0, 0, 0, 0, 0.0f }, -1, 0, 0.0f };
+static void mel_sound(const struct mev *e, int v, int duck)
+{
+    float E = mel_expr();
     int midi = deg_pitch(e->deg, e->alt);
     if (v % 8 == 0 && e->len >= 2) midi = snap_to_chord(midi);
     while (midi > 86) midi -= 12;
     while (midi < 55) midi += 12;
-    float vel = e->vel * note_vel(TRK_MELODY);
-    lead_note(midi, (float)e->len * vsps(TRK_MELODY) * 0.9f * gate_mul(TRK_MELODY, vel), vel);
-    if (mel_mode_now == MMEL_ANSWER && track_style(TRK_MELODY) == MSTYLE_DUB) { /* dub: the note again, quieter (see render) */ }
+    float vel = e->vel * mx_vel[v], gate = mx_gate[v];
+    /* the charge: a note off the chord (on a beat, or held) a tension, louder and longer; the step after it onto a
+     * chord tone its resolution, softer; a chord away from home, a little more */
+    int chord_tone = 0;
+    for (int i = 0; i < 4; ++i) if ((((midi - chord_pc(cur_chord, i)) % 12) + 12) % 12 == 0) chord_tone = 1;
+    if (!chord_tone && (v % 4 == 0 || e->len >= 2)) { vel *= 1.0f + 0.12f * E; gate *= 1.0f + 0.08f * E; m_tension = midi; }
+    else {
+        if (m_tension && chord_tone && iabs(midi - m_tension) <= 2) vel *= 1.0f - 0.12f * E;
+        m_tension = 0;
+    }
+    if (cur_chord->root != 0) vel *= 1.0f + (cur_chord->q == Q_DOM ? 0.08f : 0.04f) * E;
+    if (duck) vel *= 0.63f;                                                   /* under the snare: -4 dB */
+    vel = vel < 0.2f ? 0.2f : vel > 1.25f ? 1.25f : vel;
+    lead_note(midi, (float)e->len * vsps(TRK_MELODY) * 0.9f * gate, vel);
 }
 static void mel_step(int v)
 {
-    if (v == 0) mel_plan();
-    if (form_hole(TRK_MELODY)) { if (lead.stage != 3) lead.stage = 3; return; }
+    if (v == 0) { mel_plan(); mel_shape(); }
+    if (form_hole(TRK_MELODY)) { if (lead.stage != 3) lead.stage = 3; mpend.v = -1; return; }
     if (!mseq[v].on) return;
-    /* off the break's snares: a short note on one waits a 16th (when that one is free) */
     uint32_t step = g % 32u;
-    if (mseq[v].len <= 2 && pat[step].active && (c_snares >> pat[step].slice & 1u) && v + 1 < 32 && !mseq[v + 1].on) {
-        mel_pending = v; mel_delay = sps;
-        return;
-    }
-    mel_sound(v);
+    int duck = mseq[v].len <= 2 && pat[step].active && (c_snares >> pat[step].slice & 1u);
+    if (mpend.v >= 0) { mel_sound(&mpend.e, mpend.v, mpend.duck); mpend.v = -1; }   /* one still waiting: now */
+    float late = mel_late(v);
+    if (late >= 1.0f) { mpend.e = mseq[v]; mpend.v = v; mpend.duck = duck; mpend.wait = late; return; }
+    mel_sound(&mseq[v], v, duck);
 }
 
 /* ------------------------------------------------------------- the form --- */
@@ -1233,7 +1308,7 @@ static void track_vstep(int t, int v)
 /* F5, the groove: a track's odd 16th comes late by its swing (of its own 16th: at half speed the swing of the real
  * 8ths); then the hands: the harmony a little behind the beat, the melody loose, the bass tight. Each 16th waits
  * in its track's queue (a double speed's second one too), its accent read as it sounds. */
-static const float ACC_K[TRACKS] = { 0.0f, 0.5f, 1.0f, 0.7f };          /* how much of the accents each track takes */
+static const float ACC_K[TRACKS] = { 0.0f, 0.5f, 1.0f, 0.0f };          /* how much of the accents each track takes (the melody: its phrase's, F5b) */
 static const float LATE_MS[TRACKS] = { 0.0f, 0.0f, 2.5f, 0.0f }, LOOSE_MS[TRACKS] = { 0.0f, 1.5f, 4.5f, 5.0f };
 static struct { float wait; int8_t v; } tq[TRACKS][3];
 static void vstep_go(int t, int v)
@@ -1243,8 +1318,10 @@ static void vstep_go(int t, int v)
 }
 static void vstep_at(int t, int v, float wait)
 {
-    if (v & 1) wait += swing_of(t) * vsps(t);
-    wait += human_of(t) * (LATE_MS[t] + LOOSE_MS[t] * hrand()) * (SR * 0.001f);
+    if (t != TRK_MELODY) {   /* (the melody's timing: its notes', mel_late) */
+        if (v & 1) wait += swing_of(t) * vsps(t);
+        wait += human_of(t) * (LATE_MS[t] + LOOSE_MS[t] * hrand()) * (SR * 0.001f);
+    }
     if (wait >= 1.0f) for (int i = 0; i < 3; ++i) if (tq[t][i].v < 0) { tq[t][i].v = (int8_t)v; tq[t][i].wait = wait; return; }
     vstep_go(t, v);
 }
@@ -1408,7 +1485,7 @@ static void render_chunk(int32_t *lr, unsigned n)
             for (int i = 0; i < 8; ++i) pend[i].live = 0;
             for (int t = 0; t < TRACKS; ++t) for (int i = 0; i < 3; ++i) tq[t][i].v = -1;
             if (lead.stage) lead.stage = 3;
-            mel_pending = -1;
+            mpend.v = -1;
         }
         if (!was_playing && playing) { layer_retime(&pad, 1.0f); layer_retime(&rhy, h_decay); song_req = 1; }   /* their own again; a new song */
         was_playing = playing;
@@ -1425,7 +1502,7 @@ static void render_chunk(int32_t *lr, unsigned n)
             if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + i); else on_hit(ev[e].a, ev[e].b);
             ++e;
         }
-        if (mel_pending >= 0 && (mel_delay -= 1.0f) <= 0.0f) { mel_sound(mel_pending); mel_pending = -1; }
+        if (mpend.v >= 0 && (mpend.wait -= 1.0f) <= 0.0f) { int pv = mpend.v; mpend.v = -1; mel_sound(&mpend.e, pv, mpend.duck); }
         for (int t = TRK_BASS; t <= TRK_MELODY; ++t)   /* the 16ths waiting: swung, late, a double speed's second */
             for (int q = 0; q < 3; ++q)
                 if (tq[t][q].v >= 0 && (tq[t][q].wait -= 1.0f) <= 0.0f) { int v = tq[t][q].v; tq[t][q].v = -1; vstep_go(t, v); }
