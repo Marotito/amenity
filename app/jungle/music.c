@@ -178,6 +178,9 @@ static volatile uint8_t c_tstyle[TRACKS] = { MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BA
 static volatile uint8_t c_bass_mode = MAUTO, c_timbre = MAUTO, c_harm = MAUTO, c_hsound = MAUTO;
 static volatile float c_energy = 0.5f, c_speed = 1.0f, c_dub;
 static volatile uint8_t c_form;
+static volatile uint8_t c_mmode = MAUTO, c_msound = MAUTO, c_mseed = MAUTO;
+static volatile uint32_t c_snares = (1u << 2) | (1u << 7) | (1u << 10) | (1u << 15);   /* the Amen's, until told */
+static volatile float m_bright = 1.0f, m_glide = 0.0f, m_vib = 0.0f;   /* K2..K4 of the melody */
 static volatile int8_t c_root = -1;
 static volatile uint8_t want[TRACKS] = { 0, 1, 1, 1 }, want_q[TRACKS];   /* muted: as asked (main loop) */
 static volatile uint8_t heard_muted[TRACKS] = { 0, 1, 1, 1 };            /* as it sounds (audio) */
@@ -204,6 +207,10 @@ void music_param(unsigned t, unsigned k, unsigned v)
         if (k == 0) bass_cut = knob_mul(v);
         else if (k == 1) bass_k = 2.0f - (float)v * (1.9f / 127.0f);          /* 64: as built; up: more resonance */
         else if (k == 2) bass_slide = ms_coef(4.0f + (float)v * ((float)v * 0.006f)); /* slide 4 .. 100 ms; 64: ~28 ms */
+    } else if (t == TRK_MELODY) {
+        if (k == 0) m_bright = knob_mul(v);
+        else if (k == 1) m_glide = v < 4u ? 0.0f : ms_coef(2.0f + (float)v * ((float)v * 0.01f));   /* off .. ~160 ms */
+        else if (k == 2) m_vib = (float)v * (0.6f / 127.0f);   /* up to 0.6 semitone */
     } else if (t == TRK_HARMONY) {
         if (k == 0) h_bright = knob_mul(v);
         else if (k == 1) h_move = (float)v * (1.0f / 64.0f);
@@ -215,6 +222,9 @@ void music_prog(unsigned p) { c_prog = (uint8_t)(p < 4u ? p : MAUTO); }
 void music_energy(unsigned v) { c_energy = (float)v * (1.0f / 127.0f); }
 void music_chord_speed(unsigned v) { c_speed = v < 43u ? 2.0f : v < 86u ? 1.0f : 0.5f; }
 void music_autodub(unsigned v) { c_dub = (float)v * (1.0f / 127.0f); }
+void music_mel_mode(unsigned m) { c_mmode = (uint8_t)(m < MMEL_MODES ? m : MAUTO); }
+void music_mel_sound(unsigned m) { c_msound = (uint8_t)(m < MMSOUNDS ? m : MAUTO); }
+void music_snares(uint32_t m) { c_snares = m; }
 void music_form(unsigned v) { c_form = (uint8_t)(v < 43u ? 0 : v < 86u ? 1 : 2); }
 void music_track_style(unsigned t, unsigned s) { if (t < TRACKS) c_tstyle[t] = (uint8_t)(s < MSTYLES ? s : MSTYLE_BASE); }
 void music_bass_mode(unsigned m) { c_bass_mode = (uint8_t)(m < MBASS_MODES ? m : MAUTO); }
@@ -813,6 +823,264 @@ static void bass_step(int v)
     bass_play(bev_note(e, v), (float)len * vsps(TRK_BASS) * (len == 1 ? 0.55f : 0.92f), slide, e->acc);
 }
 
+/* ------------------------------------------------------------- the melody --- */
+/* Seeds: short motifs from public-domain works (the composer dead more than 70 years and the work published before
+ * 1929), in steps of the key's scale (0 the tonic, 7 its octave in a 7-note scale), a semitone's alteration, length
+ * in 16ths; a rest is step R. Prototype set (F4, 18 nov): to be checked against public-domain scores before it is
+ * final. Each in the mode it was written (minor or major); the key's scale maps it. */
+#define MR 99   /* a rest */
+struct mnote { int8_t deg, alt, dur; };
+struct seed { const char *name; uint8_t n; struct mnote m[20]; };
+static const struct seed SEEDS[] = {
+    { "DIES IRAE", 8, { {2,0,4}, {1,0,4}, {2,0,4}, {0,0,4}, {1,0,4}, {-1,0,4}, {0,0,4}, {0,0,4} } },   /* Gregorian chant */
+    { "TOCCATA", 11, { {4,0,1}, {3,0,1}, {4,0,6}, {MR,0,4}, {3,0,1}, {2,0,1}, {1,0,1}, {0,0,1}, {-1,1,4}, {0,0,8}, {MR,0,4} } },   /* Bach, BWV 565 */
+    { "FIFTH", 10, { {MR,0,2}, {4,0,2}, {4,0,2}, {4,0,2}, {2,0,8}, {MR,0,2}, {3,0,2}, {3,0,2}, {3,0,2}, {1,0,8} } },   /* Beethoven, Symphony 5 */
+    { "MOUNTAIN KING", 13, { {0,0,2}, {1,0,2}, {2,0,2}, {3,0,2}, {4,0,2}, {2,0,2}, {4,0,4},
+                             {3,1,2}, {1,0,2}, {3,1,4}, {3,0,2}, {1,-1,2}, {3,0,4} } },   /* Grieg, Peer Gynt */
+    { "FUR ELISE", 18, { {4,0,1}, {3,1,1}, {4,0,1}, {3,1,1}, {4,0,1}, {1,0,1}, {3,0,1}, {2,0,1}, {0,0,3}, {MR,0,1},
+                         {-5,0,1}, {-3,0,1}, {0,0,1}, {1,0,3}, {MR,0,1}, {-3,0,1}, {-1,1,1}, {1,0,7} } },   /* Beethoven, WoO 59 */
+    { "MINUET", 11, { {4,0,4}, {0,0,2}, {1,0,2}, {2,0,2}, {3,0,2}, {4,0,4}, {0,0,4}, {0,0,4}, {5,0,4}, {3,0,2}, {4,0,2} } },   /* Petzold, BWV Anh. 114 */
+    { "GREENSLEEVES", 13, { {0,0,2}, {2,0,4}, {3,0,2}, {4,0,3}, {5,0,1}, {4,0,2}, {3,0,4}, {1,0,2}, {-1,0,3}, {0,0,1},
+                            {1,0,2}, {2,0,4}, {0,0,2} } },   /* traditional */
+    { "GYMNOPEDIE", 10, { {2,0,3}, {4,0,3}, {3,0,3}, {2,0,3}, {-1,0,3}, {-2,0,3}, {-1,0,3}, {0,0,3}, {-3,0,3}, {-5,0,5} } },   /* Satie, 1 */
+    { "BADINERIE", 10, { {0,0,2}, {2,0,1}, {0,0,1}, {-3,0,2}, {0,0,1}, {-3,0,1}, {-5,0,2}, {-3,0,1}, {-5,0,1}, {-7,0,4} } },   /* Bach, BWV 1067 */
+    { "ENTERTAINER", 17, { {1,0,1}, {1,1,1}, {2,0,1}, {7,0,3}, {2,0,1}, {7,0,3}, {2,0,1}, {7,0,7}, {7,0,1}, {8,0,1},
+                           {8,1,1}, {9,0,1}, {7,0,1}, {8,0,1}, {9,0,2}, {6,0,1}, {8,0,2} } },   /* Joplin */
+};
+enum { NSEEDS = sizeof SEEDS / sizeof SEEDS[0] };
+unsigned music_seeds(void) { return NSEEDS; }
+const char *music_seed_name(unsigned i) { return i < NSEEDS ? SEEDS[i].name : "AUTO"; }
+void music_mel_seed(unsigned i) { c_mseed = (uint8_t)(i < NSEEDS ? i : MAUTO); }
+/* each style: its seeds (AUTO), its modes' weights (SEED RIFF LINE ANSWER), its sound */
+static const struct { uint8_t n, seeds[5], w[MMEL_MODES], sound; } MSTY[MSTYLES] = {
+    { 4, { 0, 1, 2, 3 }, { 60, 0, 40, 0 }, MMSOUND_STRING },          /* breakcore */
+    { 3, { 9, 8, 5 }, { 20, 0, 50, 30 }, MMSOUND_REED },              /* jazz */
+    { 3, { 3, 1, 8 }, { 20, 80, 0, 0 }, MMSOUND_SQUARE },             /* acid */
+    { 4, { 4, 2, 5, 9 }, { 20, 50, 0, 30 }, MMSOUND_SAW },            /* hip hop */
+    { 3, { 7, 6, 4 }, { 30, 0, 0, 70 }, MMSOUND_REED },               /* dub */
+};
+
+/* the lead: one voice, five sounds */
+static struct {
+    int on, stage, sound; float ph[2], freq, target, env, fenv, vel, gate_left, vib_ph, age; struct svf f;
+} lead;
+static void lead_note(int midi, float gate, float vel)
+{
+    lead.target = mtof((float)midi);
+    if (!lead.on || m_glide <= 0.0f || lead.stage == 3) lead.freq = lead.target;
+    if (!lead.on || lead.stage == 3) {
+        lead.ph[0] = 0.0f;
+        lead.ph[1] = lead.sound == MMSOUND_SQUARE ? 0.5f : lead.sound == MMSOUND_REED ? 0.25f : 0.0f;
+        lead.age = 0.0f;
+        lead.stage = 1;
+        if (lead.sound != MMSOUND_STRING) lead.env = 0.0f;
+    }
+    lead.fenv = 1.0f;
+    lead.vel = vel;
+    lead.on = 1;
+    lead.gate_left = gate;
+}
+static float lead_render(void)
+{
+    static const float ATK[MMSOUNDS] = { 3.0f, 2.0f, 1.0f, 20.0f, 150.0f }, REL[MMSOUNDS] = { 80.0f, 40.0f, 400.0f, 90.0f, 250.0f };
+    static const float SUS[MMSOUNDS] = { 0.8f, 0.75f, 0.0f, 0.85f, 0.9f };
+    if (!lead.on) return 0.0f;
+    int snd = lead.sound;
+    float s;
+    if (m_glide > 0.0f) lead.freq += (lead.target - lead.freq) * m_glide; else lead.freq = lead.target;
+    lead.age += 1.0f / SR;
+    {   /* vibrato: the knob's; the string's grows in after 0.3 s */
+        float depth = m_vib + (snd == MMSOUND_STRING && lead.age > 0.3f ? 0.25f : 0.0f);
+        lead.vib_ph += 5.5f / SR;
+        if (lead.vib_ph >= 1.0f) lead.vib_ph -= 1.0f;
+        float inc = lead.freq * (1.0f + depth * 0.0578f * sine(lead.vib_ph)) * (1.0f / SR);
+        switch (snd) {
+        case MMSOUND_SAW:
+            s = 0.5f * (saw(&lead.ph[0], inc * 1.003f) + saw(&lead.ph[1], inc * 0.997f));
+            s = svf_lp(&lead.f, s, g_of((700.0f + 3500.0f * lead.fenv) * m_bright), 0.8f);
+            break;
+        case MMSOUND_SQUARE: case MMSOUND_REED:   /* a pulse: two saws apart (square: half, reed: a quarter) */
+            s = saw(&lead.ph[0], inc) - saw(&lead.ph[1], inc);
+            s = snd == MMSOUND_SQUARE ? svf_lp(&lead.f, s, g_of((500.0f + 4000.0f * lead.fenv) * m_bright), 0.45f)
+                                      : svf_lp(&lead.f, s, g_of(1600.0f * m_bright), 0.5f) * 0.8f;
+            break;
+        case MMSOUND_FM: {   /* two operators: a bell (3.5:1), the index dying away */
+            lead.ph[1] += inc * 3.5f; if (lead.ph[1] >= 1.0f) lead.ph[1] -= 1.0f;
+            float ph = lead.ph[0] + 0.35f * m_bright * 2.5f * lead.fenv * sine(lead.ph[1]);
+            ph -= (float)(int)ph; if (ph < 0.0f) ph += 1.0f;
+            s = sine(ph);
+            lead.ph[0] += inc; if (lead.ph[0] >= 1.0f) lead.ph[0] -= 1.0f;
+            break;
+        }
+        default:   /* the string: a saw, slow, through a filter */
+            s = saw(&lead.ph[0], inc);
+            s = svf_lp(&lead.f, s, g_of(2200.0f * m_bright), 0.9f);
+            break;
+        }
+    }
+    lead.fenv *= snd == MMSOUND_FM ? 0.99985f : 0.9994f;
+    if (lead.stage == 1) { lead.env += (1.05f - lead.env) * ms_coef(ATK[snd]); if (lead.env >= 1.0f) { lead.env = 1.0f; lead.stage = 2; } }
+    else if (lead.stage == 2) lead.env += (SUS[snd] - lead.env) * ms_coef(snd == MMSOUND_FM ? 600.0f : 200.0f);
+    else { lead.env -= lead.env * ms_coef(REL[snd]); if (lead.env < 1e-4f) { lead.on = 0; lead.env = 0.0f; } }
+    if (lead.stage != 3 && lead.gate_left > 0.0f && (lead.gate_left -= 1.0f) <= 0.0f) lead.stage = 3;
+    return soft(1.3f * s) * lead.env * lead.vel;
+}
+
+/* the line: a phrase of the track's own 32 16ths, notes as steps of the key's scale (the chord's tones on the
+ * strong beats), made when the phrase starts */
+struct mev { int8_t on, deg, alt, len; float vel; };
+static struct mev mseq[32];
+static uint8_t mel_mode_now = MMEL_SEED, mel_sound_now = MMSOUND_STRING, mel_seed_now, m_left, m_phrase;
+static int8_t riff_deg[16], riff_len[16];
+static struct jungle_step pat[JUNGLE_STEPS];
+static int mel_tonic(void) { int t = 60 + key_root; return t < 62 ? t + 12 : t; }
+static uint16_t key_scale(void)   /* the scale of the progression's home chord (its root on the key), over the key */
+{
+    const struct prog *p = P();
+    for (int i = 0; i < p->n; ++i) if (p->c[i].root == 0) return SCALE[p->c[i].sc];
+    return SCALE[p->c[0].sc];
+}
+static int deg_pitch(int deg, int alt)
+{
+    uint16_t m = key_scale();
+    int n = 0, steps[12], oct = 0;
+    for (int i = 0; i < 12; ++i) if (m >> i & 1u) steps[n++] = i;
+    while (deg < 0) { deg += n; --oct; }
+    while (deg >= n) { deg -= n; ++oct; }
+    return mel_tonic() + steps[deg] + 12 * oct + alt;
+}
+static int snap_to_chord(int midi)   /* a strong beat's "avoid note" (a half step over a chord tone) down onto it */
+{
+    for (int i = 0; i < 4; ++i)
+        if ((((midi - chord_pc(cur_chord, i)) % 12) + 12) % 12 == 1) return midi - 1;
+    return midi;
+}
+static void put(int at, int deg, int alt, int len, float vel)
+{
+    if (at < 0 || at >= 32 || deg == MR) return;
+    mseq[at].on = 1; mseq[at].deg = (int8_t)deg; mseq[at].alt = (int8_t)alt; mseq[at].len = (int8_t)len; mseq[at].vel = vel;
+}
+/* a seed laid from `at`, transformed: shifted (a sequence), inverted, its length times `aug` (2: half its notes),
+ * the first `upto` notes only, the last one landing on `end` (MR: as written) */
+static int lay_seed(const struct seed *sd, int at, int shift, int inv, int aug, int upto, int end)
+{
+    int d0 = sd->m[0].deg == MR ? 0 : sd->m[0].deg, n = upto < sd->n ? upto : sd->n;
+    for (int i = 0; i < n && at < 32; ++i) {
+        const struct mnote *m = &sd->m[i];
+        int len = m->dur * aug, deg = m->deg;
+        if (deg != MR) {
+            if (inv) deg = d0 - (deg - d0);
+            deg += shift;
+            if (i == n - 1 && end != MR) deg = end;
+        }
+        put(at, deg, deg == m->deg + shift ? m->alt : 0, len, i == 0 ? 0.95f : 0.8f);
+        at += len;
+    }
+    return at;
+}
+static void make_riff(const struct seed *sd)   /* a bar's hook from a seed's start: its notes, quick */
+{
+    float e = energy();
+    int at = 0, i = 0;
+    memset(riff_len, 0, sizeof riff_len);
+    for (int k = 0; k < 16; ++k) riff_deg[k] = MR;
+    while (at < 16 && i < sd->n) {
+        const struct mnote *m = &sd->m[i++];
+        int len = m->dur > 2 ? 2 : m->dur;
+        if (m->deg == MR) { at += len; continue; }
+        riff_deg[at] = m->deg; riff_len[at] = (int8_t)len;
+        at += len + (frnd() > 0.4f + 0.5f * e ? 1 : 0);
+    }
+}
+static void mel_plan(void)   /* the melody track's own phrase starts */
+{
+    const int st = track_style(TRK_MELODY), sect_k = form_on ? FORM[base_style][song_var].s[sec_i][0] : S_CHORUS;
+    float e = energy();
+    memset(mseq, 0, sizeof mseq);
+    /* the mode (AUTO: the style's, a few phrases), the sound, the seed */
+    if (c_mmode != MAUTO) mel_mode_now = c_mmode;
+    else if (form_on && (sect_k == S_CHORUS || sect_k == S_DROP || sect_k == S_BREAKDOWN) && MSTY[st].w[MMEL_SEED]) mel_mode_now = MMEL_SEED;
+    else if (m_left == 0 || --m_left == 0) {
+        unsigned tot = 0, x;
+        for (int m = 0; m < MMEL_MODES; ++m) tot += MSTY[st].w[m];
+        x = rnd(tot ? tot : 1);
+        for (int m = 0; m < MMEL_MODES; ++m) { if (x < MSTY[st].w[m]) { mel_mode_now = (uint8_t)m; break; } x -= MSTY[st].w[m]; }
+        m_left = (uint8_t)(2 + rnd(3));
+    }
+    mel_sound_now = c_msound == MAUTO ? MSTY[st].sound : c_msound;
+    lead.sound = mel_sound_now;
+    if (c_mseed != MAUTO) mel_seed_now = c_mseed;
+    else if (m_phrase % 4u == 0) mel_seed_now = MSTY[st].seeds[rnd(MSTY[st].n)];
+    const struct seed *sd = &SEEDS[mel_seed_now];
+    int answer = m_phrase & 1u;
+    ++m_phrase;
+    if (form_on && sect_k == S_INTRO) { put(0, sd->m[0].deg == MR ? 0 : sd->m[0].deg, 0, 28, 0.6f); return; }
+    switch (mel_mode_now) {
+    case MMEL_SEED:
+        if (form_on && sect_k == S_BREAKDOWN) lay_seed(sd, 0, 0, 0, 2, answer ? sd->n : (sd->n + 1) / 2, answer ? 0 : MR);   /* slow */
+        else if (form_on && sect_k == S_BRIDGE) lay_seed(sd, 0, answer ? -1 : 1, 1, 1, sd->n, MR);                          /* developed */
+        else if (form_on && sect_k == S_PRE) lay_seed(sd, 0, (int)(m_phrase % 4u), 0, 1, sd->n, MR);                      /* rising */
+        else if (form_on && sect_k == S_VERSE) { lay_seed(sd, 4, 0, 0, 1, 3, MR); if (answer) lay_seed(sd, 20, -1, 0, 1, 3, 0); }
+        else if (!answer) lay_seed(sd, 0, 0, 0, 1, sd->n, 4);   /* the statement, open on the fifth */
+        else {   /* the answer: the seed again, a step down or turned over, home on the tonic */
+            int how = (int)rnd(3);
+            lay_seed(sd, 0, how == 0 ? -1 : 0, how == 1, 1, how == 2 ? (sd->n + 1) / 2 : sd->n, 0);
+            if (how == 2) put(16, 0, 0, 8, 0.85f);
+        }
+        break;
+    case MMEL_RIFF:
+        if (m_phrase % 4u == 1 || !riff_len[0]) make_riff(sd);
+        else if (rnd(3) == 0) { int k = (int)rnd(16); if (riff_deg[k] != MR) riff_deg[k] = (int8_t)(riff_deg[k] + (rnd(2) ? 1 : -1)); }
+        for (int bar = 0; bar < 2; ++bar) for (int k = 0; k < 16; ++k) if (riff_deg[k] != MR) put(bar * 16 + k, riff_deg[k], 0, riff_len[k], k == 0 ? 0.95f : 0.8f);
+        break;
+    case MMEL_LINE: {   /* steps mostly, a leap answered the other way, long notes on the way home */
+        int at = (int)rnd(2) * 2, deg = (int)rnd(3) * 2, dir = rnd(2) ? 1 : -1;
+        while (at < 30) {
+            static const int8_t LEN[4] = { 2, 2, 4, 1 };
+            int len = LEN[rnd(4)];
+            if (frnd() > 0.3f + 0.6f * e && len < 4) len *= 2;
+            put(at, deg, 0, len, 0.8f);
+            at += len;
+            if (rnd(5) == 0) { deg += dir * (3 + (int)rnd(2)); dir = -dir; } else deg += dir;
+            if (deg > 9) { deg = 8; dir = -1; } if (deg < -4) { deg = -3; dir = 1; }
+            if (rnd(6) == 0) dir = -dir;
+        }
+        put(28, 0, 0, 4, 0.85f);
+        break;
+    }
+    default: {   /* ANSWER: fragments in each bar's second half, after the break has spoken */
+        for (int bar = 0; bar < 2; ++bar) if (bar == 1 || frnd() < 0.5f + 0.5f * e)
+            lay_seed(sd, bar * 16 + 8 + (int)rnd(2) * 2, bar ? -1 : 0, 0, 1, 2 + (int)rnd(2), bar ? 0 : MR);
+        break;
+    }
+    }
+}
+static float mel_delay;   /* a note moved off a snare: when it sounds */
+static int mel_pending = -1;
+static void mel_sound(int v)
+{
+    const struct mev *e = &mseq[v];
+    int midi = deg_pitch(e->deg, e->alt);
+    if (v % 8 == 0 && e->len >= 2) midi = snap_to_chord(midi);
+    while (midi > 86) midi -= 12;
+    while (midi < 55) midi += 12;
+    lead_note(midi, (float)e->len * vsps(TRK_MELODY) * 0.9f, e->vel);
+    if (mel_mode_now == MMEL_ANSWER && track_style(TRK_MELODY) == MSTYLE_DUB) { /* dub: the note again, quieter (see render) */ }
+}
+static void mel_step(int v)
+{
+    if (v == 0) mel_plan();
+    if (form_hole(TRK_MELODY)) { if (lead.stage != 3) lead.stage = 3; return; }
+    if (!mseq[v].on) return;
+    /* off the break's snares: a short note on one waits a 16th (when that one is free) */
+    uint32_t step = g % 32u;
+    if (mseq[v].len <= 2 && pat[step].active && (c_snares >> pat[step].slice & 1u) && v + 1 < 32 && !mseq[v + 1].on) {
+        mel_pending = v; mel_delay = sps;
+        return;
+    }
+    mel_sound(v);
+}
+
 /* ------------------------------------------------------------- the form --- */
 static void harmony_section(void);
 static void section_enter(int i)
@@ -886,7 +1154,7 @@ static int form_hole(int t)   /* the harmony's hole before a rise (half a bar), 
     if (!form_on || !(trans_up || trans_drop)) return 0;
     left = (sec_start + sec_len - bpos) / feel[TRK_BREAK];
     if (trans_drop) return left <= 16u;
-    return t == TRK_HARMONY && left <= 8u;
+    return (t == TRK_HARMONY || t == TRK_MELODY) && left <= 8u;
 }
 
 /* ------------------------------------------------------ the tracks' clocks --- */
@@ -905,6 +1173,7 @@ static void track_vstep(int t, int v)
 {
     if (t == TRK_BASS) bass_step(v);
     else if (t == TRK_HARMONY) harmony_vstep(v);
+    else if (t == TRK_MELODY) mel_step(v);
 }
 static void track_tick(int t)
 {
@@ -958,6 +1227,7 @@ static void on_step(int step, uint32_t at)
         stress = c_stress;
     }
     g = phrase_count * 32u + (uint32_t)step;
+    if (step == 0) jungle_pattern(pat);   /* the phrase's hits: the melody keeps off its snares */
     block_left = (uint8_t)(64u - g % 64u);
     if (g % 64u == 0) {   /* every 4 bars (a phrase of every speed starts): a slot's seed, the styles and their speeds */
         ++blocks;
@@ -984,6 +1254,7 @@ static void on_step(int step, uint32_t at)
     if (g % 16u == 0) autodub_bar();
     track_tick(TRK_BASS);
     track_tick(TRK_HARMONY);
+    track_tick(TRK_MELODY);
     if (jungle_roll_active() == 1) build_was_on = 1;
     bpos += feel[TRK_BREAK];   /* the BASE's time: its own speed */
 }
@@ -1026,6 +1297,9 @@ void music_view(struct music_view *v)
     v->harm_pad = (uint8_t)pad_on;
     v->harm_detail = rhythm_on ? MD_NAME[md] : "";
     for (int t = 0; t < TRACKS; ++t) v->feel[t] = feel[t];
+    v->mel_mode = mel_mode_now;
+    v->mel_sound = mel_sound_now;
+    v->mel_seed = mel_seed_now;
     v->form = c_form;
     v->section = form_on && !song_req ? sect()->name : "";
     v->sect_bar = (uint8_t)(form_on && !song_req ? (bpos - sec_start) / 32u + 1u : 0u);
@@ -1033,7 +1307,7 @@ void music_view(struct music_view *v)
 }
 
 enum { CHUNK = 256 };
-static float buf_bass[CHUNK], buf_harm[2 * CHUNK];
+static float buf_bass[CHUNK], buf_harm[2 * CHUNK], buf_mel[CHUNK];
 static float gain[TRACKS] = { 1.0f, 0.0f, 0.0f, 0.0f };
 static void render_chunk(int32_t *lr, unsigned n)
 {
@@ -1055,7 +1329,9 @@ static void render_chunk(int32_t *lr, unsigned n)
             layer_release(&rhy);
             bass.gate_left = 0.0f;
             for (int i = 0; i < 8; ++i) pend[i].live = 0;
-            second_wait[TRK_BASS] = second_wait[TRK_HARMONY] = 0.0f;
+            second_wait[TRK_BASS] = second_wait[TRK_HARMONY] = second_wait[TRK_MELODY] = 0.0f;
+            if (lead.stage) lead.stage = 3;
+            mel_pending = -1;
         }
         if (!was_playing && playing) { layer_retime(&pad, 1.0f); layer_retime(&rhy, h_decay); song_req = 1; }   /* their own again; a new song */
         was_playing = playing;
@@ -1072,11 +1348,13 @@ static void render_chunk(int32_t *lr, unsigned n)
             if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + i); else on_hit(ev[e].a, ev[e].b);
             ++e;
         }
-        for (int t = TRK_BASS; t <= TRK_HARMONY; ++t)   /* a double-speed track's second 16th */
+        if (mel_pending >= 0 && (mel_delay -= 1.0f) <= 0.0f) { mel_sound(mel_pending); mel_pending = -1; }
+        for (int t = TRK_BASS; t <= TRK_MELODY; ++t)   /* a double-speed track's second 16th */
             if (second_wait[t] > 0.0f && (second_wait[t] -= 1.0f) <= 0.0f) track_vstep(t, second_v[t]);
         pend_tick();
         float l = 0.0f, r = 0.0f;
         buf_bass[i] = bass_render() * 0.55f;
+        buf_mel[i] = lead_render() * 0.32f;
         layer_render(&pad, &l, &r, g_pad);
         layer_render(&rhy, &l, &r, g_pad);
         buf_harm[2 * i] = l;
@@ -1092,7 +1370,7 @@ static void render_chunk(int32_t *lr, unsigned n)
             float d = tgt[t] - gain[t];
             gain[t] = d > glide ? gain[t] + glide : d < -glide ? gain[t] - glide : tgt[t];
         }
-        float b = buf_bass[i] * gain[TRK_BASS];
+        float b = buf_bass[i] * gain[TRK_BASS] + buf_mel[i] * gain[TRK_MELODY];
         float L = 0.75f * soft(1.2f * (b + buf_harm[2 * i] * gain[TRK_HARMONY]));
         float R = 0.75f * soft(1.2f * (b + buf_harm[2 * i + 1] * gain[TRK_HARMONY]));
         int32_t a = lr[2 * i], c = lr[2 * i + 1];

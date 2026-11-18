@@ -27,6 +27,8 @@ enum { MBASS_KICK, MBASS_LONG, MBASS_RAGGA, MBASS_ACID, MBASS_WALK, MBASS_ONEDRO
 enum { MTIMBRE_SUB, MTIMBRE_ACID, MTIMBRE_REESE, MTIMBRES };
 enum { MHARM_SKANK, MHARM_JAZZ, MHARM_MIX, MHARM_STABS, MHARM_PAD, MHARM_MIX_PAD, MHARM_MODES };
 enum { MHSOUND_ORGAN, MHSOUND_SAW, MHSOUNDS };
+enum { MMEL_SEED, MMEL_RIFF, MMEL_LINE, MMEL_ANSWER, MMEL_MODES };                /* the melody's modes */
+enum { MMSOUND_SAW, MMSOUND_SQUARE, MMSOUND_FM, MMSOUND_REED, MMSOUND_STRING, MMSOUNDS };   /* and sounds */
 #define MAUTO 0xFFu          /* a mode, sound or progression the style chooses */
 #define MSTYLE_BASE 0xFFu    /* a track that plays in the BASE style */
 
@@ -48,6 +50,12 @@ void music_bass_mode(unsigned mode);                         /* MAUTO or a mode 
 void music_bass_timbre(unsigned timbre);
 void music_harm_mode(unsigned mode);
 void music_harm_sound(unsigned sound);
+void music_mel_mode(unsigned mode);                          /* MAUTO or a mode */
+void music_mel_sound(unsigned sound);
+void music_mel_seed(unsigned seed);                          /* MAUTO (the style's) or one of music_seeds() */
+unsigned music_seeds(void);
+const char *music_seed_name(unsigned seed);
+void music_snares(uint32_t slices);                          /* the break's snare slices (its one-shots'): the melody avoids them */
 void music_root(unsigned pc);       /* the key: the feedback's root (FX + key), from the next progression */
 void music_stress(int on);          /* CPU test: every voice held, every track heard */
 /* the slots (F3): the generator's seed from the next 4-bar block (with the form: a new song from it), the seed of
@@ -65,6 +73,7 @@ struct music_view {
     uint8_t harm_pad;                        /* the pad sounding with it */
     const char *harm_detail;                 /* the rhythm layer's figure: "A", "J HEMIOLA", ... */
     uint8_t feel[TRACKS];                    /* 1 half, 2 normal, 4 double */
+    uint8_t mel_mode, mel_sound, mel_seed;   /* the melody now (AUTO resolved) */
     uint8_t form;                            /* 0 OFF, 1 ON, 2 ON + BREAK */
     const char *section;                     /* the section sounding (form on) */
     uint8_t sect_bar, sect_bars;             /* its bar (1..) and its length, in the style's bars */

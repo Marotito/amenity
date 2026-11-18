@@ -107,18 +107,22 @@ static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE"};
 static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "STABS", "PAD", "MIX+PAD"};
 static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW"};
 static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB"};
+static const char *const MEL_MODE[MMEL_MODES] = {"SEED", "RIFF", "LINE", "ANSWER"};
+static const char *const MEL_SOUND[MMSOUNDS] = {"SAW", "SQUARE", "FM BELL", "REED", "STRING"};
 static struct {
     uint8_t focus, stress;
     uint8_t level[TRACKS];
     uint8_t style, prog, energy, chords, autodub, form;   /* the BASE (prog: MAUTO or 0..3) */
     uint8_t tstyle[TRACKS];                          /* MSTYLE_BASE or a style */
     uint8_t bass_mode, bass_sound, harm_mode, harm_sound;   /* MAUTO or one */
+    uint8_t mel_mode, mel_sound, mel_seed;
     uint8_t param[TRACKS][3];                /* K2..K4 of the bass and the harmony */
 } fac = {.focus = 1 + TRK_BASS, .level = {100, 100, 100, 100}, .style = MSTYLE_BREAKCORE, .prog = MAUTO,
          .energy = 64, .chords = 64, .autodub = 0,
          .tstyle = {MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE, MSTYLE_BASE},
          .bass_mode = MAUTO, .bass_sound = MAUTO, .harm_mode = MAUTO, .harm_sound = MAUTO,
-         .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 64, 64}}};
+         .mel_mode = MAUTO, .mel_sound = MAUTO, .mel_seed = MAUTO,
+         .param = {{64, 64, 64}, {64, 64, 64}, {64, 64, 64}, {64, 0, 0}}};
 /* a choice with AUTO first: MAUTO, 0, 1 .. n-1, turned d */
 static uint8_t auto_turn(uint8_t v, int32_t d, unsigned n)
 {
@@ -206,6 +210,7 @@ static void select_break(unsigned i)
         return;
     st.brk = i;
     (void)jungle_bind(b->data, b->bytes, b->frames);
+    music_snares((1u << b->shots[1]) | (1u << b->shots[3]) | (1u << b->shots[4]) | (1u << b->shots[5]));   /* (kick snare kick snare snare snare hat ride) */
     ui.redraw = 1;
 }
 
@@ -214,7 +219,7 @@ static void select_break(unsigned i)
  * knobs), the mutes, the tempo and the seed (the same music again). In the store object OBJ_SETTINGS with the
  * breaks page's order (user_breaks.c): one write for both. A save while playing waits for the next STOP (a flash
  * write silences the FM-1 for a moment); a load from the next 4-bar block (Marote, 18 nov). */
-enum { SLOTS = 16, SLOT_VERSION = 1 };
+enum { SLOTS = 16, SLOT_VERSION = 2 };   /* 2: the melody (F4) */
 #define SLOTS_MAGIC 0x31534C46u                /* "FLS1" */
 struct slot {
     uint8_t used, ver;
@@ -225,6 +230,7 @@ struct slot {
     uint8_t tstyle[TRACKS], bass_mode, bass_sound, harm_mode, harm_sound;
     uint8_t level[TRACKS], param[TRACKS][3], mutes;
     uint32_t seed;
+    uint8_t mel_mode, mel_sound, mel_seed, rsv;   /* v2 */
 };
 static struct slot slots[SLOTS];
 static struct {
@@ -263,9 +269,22 @@ static void settings_load(void)
         return;
     memcpy(&user_order, buf, sizeof user_order);
     if (n >= (int)(sizeof user_order + 8u)) {
-        memcpy(&slot_store, buf + sizeof user_order, (unsigned)n - sizeof user_order);
-        if (slot_store.magic == SLOTS_MAGIC && slot_store.slot_size == sizeof(struct slot))
-            memcpy(slots, slot_store.s, sizeof slots);
+        const uint8_t *in = buf + sizeof user_order;
+        uint32_t magic;
+        uint16_t size;
+        memcpy(&magic, in, 4);
+        memcpy(&size, in + 6, 2);
+        if (magic == SLOTS_MAGIC && size && size <= sizeof(struct slot) &&
+            (unsigned)n >= sizeof user_order + 8u + SLOTS * (unsigned)size) {
+            unsigned i;
+            for (i = 0; i < SLOTS; i++) {        /* a slot of an older, shorter kind: what it has, the rest AUTO */
+                memcpy(&slots[i], in + 8 + i * size, size);
+                if (size < sizeof(struct slot) && slots[i].used) {
+                    slots[i].mel_mode = slots[i].mel_sound = slots[i].mel_seed = MAUTO;
+                    slots[i].param[TRK_MELODY][0] = 64, slots[i].param[TRK_MELODY][1] = 0, slots[i].param[TRK_MELODY][2] = 0;
+                }
+            }
+        }
     }
 }
 
@@ -333,6 +352,9 @@ static void slot_capture(struct slot *x)
             x->mutes |= (uint8_t)(1u << t);
     }
     x->seed = music_song_seed();
+    x->mel_mode = fac.mel_mode;
+    x->mel_sound = fac.mel_sound;
+    x->mel_seed = fac.mel_seed;
 }
 /* a slot in two steps, so it all lands on the block: the music's part (its style, its tracks, the mutes at the
  * phrase, the seed) a 16th before, the break's (the tempo, the break, its knobs) as the block starts */
@@ -349,6 +371,9 @@ static void slot_apply_music(const struct slot *x, int vary)
     music_bass_timbre(fac.bass_sound = x->bass_sound);
     music_harm_mode(fac.harm_mode = x->harm_mode);
     music_harm_sound(fac.harm_sound = x->harm_sound);
+    music_mel_mode(fac.mel_mode = x->mel_mode);
+    music_mel_sound(fac.mel_sound = x->mel_sound);
+    music_mel_seed(fac.mel_seed = x->mel_seed);
     for (t = 0; t < TRACKS; t++) {
         music_track_style(t, fac.tstyle[t] = x->tstyle[t]);
         music_track_level(t, fac.level[t] = x->level[t]);
@@ -633,15 +658,24 @@ static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
         } else if (f == TRK_HARMONY) {
             music_harm_mode(fac.harm_mode = auto_turn(fac.harm_mode, e[EN_ALGO], MHARM_MODES));
             app_say("HARMONY MODE", fac.harm_mode == MAUTO ? "AUTO" : HARM_MODE[fac.harm_mode]);
+        } else if (f == TRK_MELODY) {
+            music_mel_mode(fac.mel_mode = auto_turn(fac.mel_mode, e[EN_ALGO], MMEL_MODES));
+            app_say("MELODY MODE", fac.mel_mode == MAUTO ? "AUTO" : MEL_MODE[fac.mel_mode]);
         }
     }
-    if (e[EN_PRESET]) {
+    if (e[EN_PRESET] && sel && f == TRK_MELODY) {   /* SEL + PRESET: the melody's seed */
+        music_mel_seed(fac.mel_seed = auto_turn(fac.mel_seed, e[EN_PRESET], music_seeds()));
+        app_say("SEED", fac.mel_seed == MAUTO ? "AUTO" : music_seed_name(fac.mel_seed));
+    } else if (e[EN_PRESET]) {
         if (f == TRK_BASS) {
             music_bass_timbre(fac.bass_sound = auto_turn(fac.bass_sound, e[EN_PRESET], MTIMBRES));
             app_say("BASS SOUND", fac.bass_sound == MAUTO ? "AUTO" : BASS_SOUND[fac.bass_sound]);
         } else if (f == TRK_HARMONY) {
             music_harm_sound(fac.harm_sound = auto_turn(fac.harm_sound, e[EN_PRESET], MHSOUNDS));
             app_say("HARMONY SOUND", fac.harm_sound == MAUTO ? "AUTO" : HARM_SOUND[fac.harm_sound]);
+        } else if (f == TRK_MELODY) {
+            music_mel_sound(fac.mel_sound = auto_turn(fac.mel_sound, e[EN_PRESET], MMSOUNDS));
+            app_say("MELODY SOUND", fac.mel_sound == MAUTO ? "AUTO" : MEL_SOUND[fac.mel_sound]);
         } else if (f == TRK_BREAK && breaks_count()) {
             int n = (int)breaks_count();
             select_break((unsigned)wrap((int)st.brk, e[EN_PRESET] > 0 ? 1 : -1, n));
@@ -934,8 +968,13 @@ static void facility_tracks(uint32_t now)
                 text_cat(what, "+P");
             text_cat(what, "/");
             text_cat(what, HARM_SOUND[mv.harm_sound]);
-        } else
-            text_cat(what, "(PHASE 4)");
+        } else {
+            if (fac.mel_mode == MAUTO)
+                text_cat(what, "A:");
+            text_cat(what, MEL_MODE[mv.mel_mode % MMEL_MODES]);
+            text_cat(what, "/");
+            text_cat(what, MEL_SOUND[mv.mel_sound % MMSOUNDS]);
+        }
         if (focused)
             cv_rect(0, y, 240, 18, RGB(20, 60, 75));
         cv_rect(0, y, 3, 18, focused ? C_CYAN : C_BLACK);
@@ -1021,15 +1060,18 @@ static void facility_knobs(void)
         else
             int_text((int32_t)st.filter - 64, t);
         value(180, 46, "FILTER", t, st.filter, 1);
-    } else if (f == TRK_BASS || f == TRK_HARMONY) {
-        static const char *const LBL[2][3] = {{"CUTOFF", "RESO", "SLIDE"}, {"BRIGHT", "MOVEMENT", "DECAY"}};
-        unsigned k;
+    } else {
+        static const char *const LBL[3][3] = {
+            {"CUTOFF", "RESO", "SLIDE"}, {"BRIGHT", "MOVEMENT", "DECAY"}, {"BRIGHT", "GLIDE", "VIBRATO"}};
+        unsigned k, row = f == TRK_BASS ? 0u : f == TRK_HARMONY ? 1u : 2u;
         for (k = 0; k < 3u; k++) {
-            int_text((int32_t)fac.param[f][k] - 64, t);
-            value(64 + (int32_t)k * 58, 46, LBL[f == TRK_HARMONY][k], t, fac.param[f][k], 1);
+            if (row == 2u && k > 0u)
+                int_text((int32_t)fac.param[f][k], t);
+            else
+                int_text((int32_t)fac.param[f][k] - 64, t);
+            value(64 + (int32_t)k * 58, 46, LBL[row][k], t, fac.param[f][k], row == 2u && k > 0u ? 0 : 1);
         }
-    } else
-        cv_text(64, 59, &FONT_XS, "THE MELODY COMES IN PHASE 4", C_GRAY);
+    }
 }
 /* the line at the bottom: what the focus's encoders do, its style and speed */
 static void facility_hint(char *h)
@@ -1042,11 +1084,17 @@ static void facility_hint(char *h)
         return;
     }
     f = fac.focus - 1u;
-    if (f == TRK_BREAK || f == TRK_MELODY) {
-        text_cat(h, f == TRK_BREAK ? "PRESET BREAK  GLO = BACK" : "GLO = BACK");
+    if (f == TRK_BREAK) {
+        text_cat(h, "PRESET BREAK  GLO = BACK");
         return;
     }
     music_view(&mv);
+    if (f == TRK_MELODY) {                   /* the seed it develops */
+        text_cat(h, fac.mel_seed == MAUTO ? "SEED A:" : "SEED ");
+        text_cat(h, music_seed_name(mv.mel_seed));
+        text_cat(h, mv.feel[f] == 1 ? " 1/2" : mv.feel[f] == 4 ? " x2" : "");
+        return;
+    }
     text_cat(h, "STYLE ");
     text_cat(h, fac.tstyle[f] == MSTYLE_BASE ? "= BASE" : music_style_name(fac.tstyle[f]));
     text_cat(h, mv.feel[f] == 1 ? "  HALF SPEED" : mv.feel[f] == 4 ? "  DOUBLE SPEED" : "");
