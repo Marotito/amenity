@@ -223,6 +223,12 @@ void music_harm_mode(unsigned m) { c_harm = (uint8_t)(m < MHARM_MODES ? m : MAUT
 void music_harm_sound(unsigned m) { c_hsound = (uint8_t)(m < MHSOUNDS ? m : MAUTO); }
 void music_root(unsigned pc) { c_root = (int8_t)(pc % 12u); }
 void music_stress(int on) { c_stress = (uint8_t)!!on; }
+static volatile uint32_t c_seed, song_seed, blocks;
+static volatile uint8_t c_seed_set, block_left = 64;
+void music_seed(uint32_t seed) { c_seed = seed; c_seed_set = 1; }
+uint32_t music_song_seed(void) { return song_seed; }
+unsigned music_block_left(void) { return block_left; }
+uint32_t music_blocks(void) { return blocks; }
 
 /* ------------------------------------------------------------ the conductor --- */
 /* Time in the BASE's own 16ths, in halves (an integer at every speed): a real 16th moves it 1 (half speed), 2 or 4
@@ -842,6 +848,7 @@ static void section_enter(int i)
 }
 static void song_new(void)   /* at PLAY, at a new style, with the form turned on: a form, three progressions */
 {
+    song_seed = rng;   /* (a slot's seed: the same song again from it) */
     song_var = (uint8_t)rnd(2);
     sec_prog[0] = (uint8_t)rnd(4);
     do sec_prog[1] = (uint8_t)rnd(4); while (sec_prog[1] == sec_prog[0]);
@@ -951,7 +958,11 @@ static void on_step(int step, uint32_t at)
         stress = c_stress;
     }
     g = phrase_count * 32u + (uint32_t)step;
-    if (g % 64u == 0) {   /* every 4 bars (a phrase of every speed starts): the styles and their speeds */
+    block_left = (uint8_t)(64u - g % 64u);
+    if (g % 64u == 0) {   /* every 4 bars (a phrase of every speed starts): a slot's seed, the styles and their speeds */
+        ++blocks;
+        if (c_seed_set) { c_seed_set = 0; rng = c_seed ? c_seed : 1u; song_req = 1; }
+        if (!form_on) song_seed = rng;
         int new_style = c_style != base_style;
         base_style = c_style;
         feel[TRK_BREAK] = speed_for(STYLE[base_style].centre);

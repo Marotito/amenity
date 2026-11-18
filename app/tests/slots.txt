@@ -1,0 +1,58 @@
+# Facility F3: the slots. ENV held + white key: load (+ SEL: varied, + EDIT: save). A save while playing writes at
+# STOP (no flash write while the sound plays); a load lands on the next 4-bar block (the music a 16th before, the
+# tempo and the break's knobs at the block); stopped, at once. The store keeps them through a reboot.
+#   sh build.sh --host && app/build/host/amenity_host app/tests/slots.txt build/slots
+wait 900
+master 4096
+spin SELECT 10
+spin K2 18
+tap SAVE
+tap ARP
+tap PLAY
+wait 3000
+press ENV
+press EDIT
+key w0 down
+key w0 up
+release EDIT
+wait 200
+shot 01-grid-saved.png
+release ENV
+wait 300
+shot 02-unsaved.png
+expect store_writes 0
+tap GLO
+spin SELECT -1
+wait 50
+spin SELECT -1
+wait 50
+spin ALGO 1
+wait 50
+spin ALGO 1
+tap SAVE
+wait 300
+shot 03-acid.png
+wait 6000
+press ENV
+key w0 down
+key w0 up
+wait 200
+shot 04-pending.png
+release ENV
+wait 7000
+shot 05-loaded.png
+tap PLAY
+wait 500
+expect store_writes >0
+press ENV
+key w1 down
+key w1 up
+release ENV
+wait 300
+shot 06-empty.png
+reboot
+wait 1500
+press ENV
+wait 300
+shot 07-after-reboot.png
+release ENV

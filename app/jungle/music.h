@@ -50,6 +50,12 @@ void music_harm_mode(unsigned mode);
 void music_harm_sound(unsigned sound);
 void music_root(unsigned pc);       /* the key: the feedback's root (FX + key), from the next progression */
 void music_stress(int on);          /* CPU test: every voice held, every track heard */
+/* the slots (F3): the generator's seed from the next 4-bar block (with the form: a new song from it), the seed of
+ * what plays (the song's, or the block's without the form), the 16ths to the next block and the blocks so far */
+void music_seed(uint32_t seed);
+uint32_t music_song_seed(void);
+unsigned music_block_left(void);
+uint32_t music_blocks(void);
 
 /* what plays now, for the screen */
 struct music_view {

@@ -50,8 +50,8 @@ static int order_valid(const uint8_t *o)
 static void order_load(void)
 {
     uint32_t i;
-    if (plat_store_load(OBJ_SETTINGS, &user_order, sizeof user_order) == (int)sizeof user_order &&
-        user_order.magic == ORDER_MAGIC && order_valid(user_order.order))
+    settings_load();                         /* (the order and the slots: one store object) */
+    if (user_order.magic == ORDER_MAGIC && order_valid(user_order.order))
         return;
     user_order.magic = ORDER_MAGIC;
     for (i = 0; i < USER_SLOTS; i++)
@@ -293,7 +293,7 @@ void app_usb_cmd(const uint8_t *d, uint32_t n)
         else {
             for (s = 0; s < USER_SLOTS; s++)
                 user_order.order[s] = b[s];
-            rc = plat_store_save(OBJ_SETTINGS, &user_order, sizeof user_order) ? ST_FLASH : ST_DONE;
+            rc = settings_save() ? ST_FLASH : ST_DONE;
             user_reindex(playing);
         }
         reply_status(CMD_ORDER, rc);

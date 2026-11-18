@@ -94,7 +94,7 @@ enum { Q_SWEEP = 14, Q_FLAT = 8 };       /* the DJ filter rings only while K4 tu
 static struct {
     unsigned tempo, rhythm, filter, warp, feedback, root, lofi, saturation, compression, brk;
     int transpose, eq_db[4];
-    uint8_t playing, frozen, auto_roll, page, fx_used, external, filter_q;
+    uint8_t playing, frozen, auto_roll, page, fx_used, env_used, external, filter_q;
     uint32_t filter_turned, filter_q_step, clock_near;
 } st = {.tempo = 1600, .filter = 64, .root = 4, .filter_q = Q_FLAT};
 
@@ -209,7 +209,65 @@ static void select_break(unsigned i)
     ui.redraw = 1;
 }
 
+/* ------------------------------------------------------------------ slots --- */
+/* F3: 16 slots, a whole scene each: Amenity's settings, the BASE, the four tracks (style, mode, sound, level,
+ * knobs), the mutes, the tempo and the seed (the same music again). In the store object OBJ_SETTINGS with the
+ * breaks page's order (user_breaks.c): one write for both. A save while playing waits for the next STOP (a flash
+ * write silences the FM-1 for a moment); a load from the next 4-bar block (Marote, 18 nov). */
+enum { SLOTS = 16, SLOT_VERSION = 1 };
+#define SLOTS_MAGIC 0x31534C46u                /* "FLS1" */
+struct slot {
+    uint8_t used, ver;
+    uint16_t tempo;
+    uint8_t brk, rhythm, warp, filter, feedback, root, lofi, saturation, compression, auto_roll, filter_q;
+    int8_t transpose, eq_db[4];
+    uint8_t style, prog, energy, chords, autodub, form;
+    uint8_t tstyle[TRACKS], bass_mode, bass_sound, harm_mode, harm_sound;
+    uint8_t level[TRACKS], param[TRACKS][3], mutes;
+    uint32_t seed;
+};
+static struct slot slots[SLOTS];
+static struct {
+    int8_t pending, current;                 /* a load waiting for its block, the last one loaded or saved */
+    uint8_t vary, dirty, stage;              /* stage 1: the music asked, 2: the rest at the block */
+    uint32_t block;
+} sl = {-1, -1, 0, 0, 0, 0};
+static int settings_save(void);
+static void settings_load(void);
 #include "user_breaks.c"
+
+/* the store: the breaks page's order, then the slots (a store from before them: the order alone) */
+static struct {
+    uint32_t magic;
+    uint16_t ver, slot_size;
+    struct slot s[SLOTS];
+} slot_store;
+static int settings_save(void)
+{
+    uint8_t buf[sizeof user_order + sizeof slot_store];
+    slot_store.magic = SLOTS_MAGIC;
+    slot_store.ver = SLOT_VERSION;
+    slot_store.slot_size = (uint16_t)sizeof(struct slot);
+    memcpy(slot_store.s, slots, sizeof slots);
+    memcpy(buf, &user_order, sizeof user_order);
+    memcpy(buf + sizeof user_order, &slot_store, sizeof slot_store);
+    sl.dirty = 0;
+    return plat_store_save(OBJ_SETTINGS, buf, sizeof buf);
+}
+static void settings_load(void)
+{
+    static uint8_t buf[sizeof user_order + sizeof slot_store];
+    int n = plat_store_load(OBJ_SETTINGS, buf, sizeof buf);
+    memset(slots, 0, sizeof slots);
+    if (n < (int)sizeof user_order)
+        return;
+    memcpy(&user_order, buf, sizeof user_order);
+    if (n >= (int)(sizeof user_order + 8u)) {
+        memcpy(&slot_store, buf + sizeof user_order, (unsigned)n - sizeof user_order);
+        if (slot_store.magic == SLOTS_MAGIC && slot_store.slot_size == sizeof(struct slot))
+            memcpy(slots, slot_store.s, sizeof slots);
+    }
+}
 
 void app_init(void)
 {
@@ -231,6 +289,147 @@ void app_init(void)
     music_root(st.root);
     jungle_lofi(st.lofi);
     jungle_pitch(st.transpose);
+}
+
+static void set_tempo(int bpm_x10);
+static void slot_capture(struct slot *x)
+{
+    unsigned t, k;
+    memset(x, 0, sizeof *x);
+    x->used = 1;
+    x->ver = SLOT_VERSION;
+    x->tempo = (uint16_t)st.tempo;
+    x->brk = (uint8_t)st.brk;
+    x->rhythm = (uint8_t)st.rhythm;
+    x->warp = (uint8_t)st.warp;
+    x->filter = (uint8_t)st.filter;
+    x->feedback = (uint8_t)st.feedback;
+    x->root = (uint8_t)st.root;
+    x->lofi = (uint8_t)st.lofi;
+    x->saturation = (uint8_t)st.saturation;
+    x->compression = (uint8_t)st.compression;
+    x->auto_roll = st.auto_roll;
+    x->filter_q = st.filter_q;
+    x->transpose = (int8_t)st.transpose;
+    for (k = 0; k < 4u; k++)
+        x->eq_db[k] = (int8_t)st.eq_db[k];
+    x->style = fac.style;
+    x->prog = fac.prog;
+    x->energy = fac.energy;
+    x->chords = fac.chords;
+    x->autodub = fac.autodub;
+    x->form = fac.form;
+    x->bass_mode = fac.bass_mode;
+    x->bass_sound = fac.bass_sound;
+    x->harm_mode = fac.harm_mode;
+    x->harm_sound = fac.harm_sound;
+    for (t = 0; t < TRACKS; t++) {
+        int muted = music_mute_pending(t) ? !music_muted(t) : music_muted(t);   /* as asked */
+        x->tstyle[t] = fac.tstyle[t];
+        x->level[t] = fac.level[t];
+        for (k = 0; k < 3u; k++)
+            x->param[t][k] = fac.param[t][k];
+        if (muted)
+            x->mutes |= (uint8_t)(1u << t);
+    }
+    x->seed = music_song_seed();
+}
+/* a slot in two steps, so it all lands on the block: the music's part (its style, its tracks, the mutes at the
+ * phrase, the seed) a 16th before, the break's (the tempo, the break, its knobs) as the block starts */
+static void slot_apply_music(const struct slot *x, int vary)
+{
+    unsigned t, k;
+    music_style(fac.style = x->style);
+    music_prog(fac.prog = x->prog);
+    music_energy(fac.energy = x->energy);
+    music_chord_speed(fac.chords = x->chords);
+    music_autodub(fac.autodub = x->autodub);
+    music_form(fac.form = x->form);
+    music_bass_mode(fac.bass_mode = x->bass_mode);
+    music_bass_timbre(fac.bass_sound = x->bass_sound);
+    music_harm_mode(fac.harm_mode = x->harm_mode);
+    music_harm_sound(fac.harm_sound = x->harm_sound);
+    for (t = 0; t < TRACKS; t++) {
+        music_track_style(t, fac.tstyle[t] = x->tstyle[t]);
+        music_track_level(t, fac.level[t] = x->level[t]);
+        for (k = 0; k < 3u; k++)
+            music_param(t, k, fac.param[t][k] = x->param[t][k]);
+        music_mute(t, (int)(x->mutes >> t & 1u), jungle_playing());
+    }
+    {
+        uint32_t seed = vary ? (x->seed * 2654435761u) ^ plat_ms() : x->seed;
+        music_seed(seed);
+        jungle_seed(seed);
+    }
+}
+static void slot_apply_break(const struct slot *x)
+{
+    unsigned k;
+    set_tempo((int)x->tempo);
+    if ((unsigned)x->brk < breaks_count())
+        select_break(x->brk);
+    jungle_variation(st.rhythm = x->rhythm);
+    jungle_warp(st.warp = x->warp);
+    jungle_filter(st.filter = x->filter);
+    jungle_filter_resonance(st.filter_q = x->filter_q);
+    jungle_feedback(st.feedback = x->feedback);
+    st.root = x->root % 12u;
+    jungle_feedback_note(st.root);
+    music_root(st.root);
+    jungle_lofi(st.lofi = x->lofi);
+    jungle_saturation(st.saturation = x->saturation);
+    jungle_compression(st.compression = x->compression);
+    jungle_pitch(st.transpose = x->transpose);
+    for (k = 0; k < 4u; k++)
+        jungle_eq(k, st.eq_db[k] = x->eq_db[k]);
+    jungle_auto_roll(st.auto_roll = x->auto_roll);
+    ui.redraw = 1;
+}
+static void slot_key(unsigned i, uint32_t btn)   /* ENV held + white key i: load; + SEL: vary; + EDIT: save */
+{
+    char n[4];
+    int_text((int32_t)i + 1, n);
+    if (btn >> B_EDIT & 1u) {
+        slot_capture(&slots[i]);
+        sl.current = (int8_t)i;
+        sl.dirty = 1;
+        if (!jungle_playing())
+            settings_save();
+        app_say(jungle_playing() ? "SAVED AT STOP" : "SAVED", n);
+        return;
+    }
+    if (!slots[i].used) {
+        app_say("EMPTY SLOT", n);
+        return;
+    }
+    sl.vary = (uint8_t)(btn >> B_SEL & 1u);
+    if (!jungle_playing()) {                 /* stopped: all of it now */
+        slot_apply_music(&slots[i], sl.vary);
+        slot_apply_break(&slots[i]);
+        sl.current = (int8_t)i;
+        sl.pending = -1;
+    } else {
+        sl.pending = (int8_t)i;
+        sl.stage = 0;
+    }
+    app_say(sl.vary ? "LOAD VARIED" : "LOAD", n);
+}
+static void slots_frame(void)   /* the main loop: a load's two steps, a save's write at STOP */
+{
+    if (sl.pending >= 0) {
+        const struct slot *x = &slots[sl.pending];
+        if (sl.stage == 0 && music_block_left() <= 1u) {
+            slot_apply_music(x, sl.vary);
+            sl.stage = 1;
+            sl.block = music_blocks();
+        } else if (sl.stage == 1 && music_blocks() != sl.block) {
+            slot_apply_break(x);
+            sl.current = sl.pending;
+            sl.pending = -1;
+        }
+    }
+    if (sl.dirty && !jungle_playing())
+        settings_save();
 }
 
 /* ------------------------------------------------------------------ input --- */
@@ -264,6 +463,14 @@ static void keys_input(uint32_t keys, uint32_t btn)
             st.fx_used = 1;                  /* FX was a modifier, not a tap */
         down = 0;
     }
+    if (btn >> B_ENV & 1u) {                 /* ENV held: a white key loads its slot (SEL: varied; EDIT: saves) */
+        for (i = 0; i < 16u; i++)
+            if (down >> WHITE[i] & 1u)
+                slot_key(i, btn);
+        if (down)
+            st.env_used = 1;
+        down = 0;
+    }
     for (i = 0; i < 16u; i++) {              /* rolls: the last white key held wins, a release hands back */
         uint32_t bit = 1u << WHITE[i], k, n = 0;
         if (up & bit) {
@@ -289,7 +496,7 @@ static void keys_input(uint32_t keys, uint32_t btn)
     }
     {                                        /* the top three black keys: instant effects while held */
         uint32_t mask = 0;
-        if (!(btn >> B_FX & 1u))
+        if (!(btn >> B_FX & 1u) && !(btn >> B_ENV & 1u))
             for (i = 0; i < 3u; i++)
                 if (keys >> BLACK[8u + i] & 1u)
                     mask |= 1u << i;
@@ -313,6 +520,8 @@ static void buttons_input(uint32_t btn, uint32_t now)
     if ((released >> B_FX & 1u) && !st.fx_used)
         st.page = st.page == PAGE_FX ? PAGE_MAIN : PAGE_FX;
     if (PRESSED(B_ENV))
+        st.env_used = 0;
+    if ((released >> B_ENV & 1u) && !st.env_used)   /* a tap: the EQ page; held with a white key: the slots */
         st.page = st.page == PAGE_EQ ? PAGE_MAIN : PAGE_EQ;
     if (PRESSED(B_PLAY)) {
         if (st.external)
@@ -669,6 +878,29 @@ static void state_name(const char *name, const char *more, uint32_t now)
 
 /* Facility's page: the four tracks where the pattern is (a row each: the focus marked, the name, the mode and the
  * sound, the level, ON / OFF, amber while a mute waits for the phrase's end), and the focus's knobs below */
+/* ENV held: the 16 slots where the pattern is, as the white keys (a cell each: empty dark, full white, the last
+ * loaded or saved cyan, one waiting for its block amber) */
+static void slots_grid(void)
+{
+    unsigned i;
+    for (i = 0; i < SLOTS; i++) {
+        int32_t x = (int32_t)(i % 8u) * 30, y = (int32_t)(i / 8u) * 38;
+        uint16_t bgc = sl.pending == (int)i ? C_ORANGE : sl.current == (int)i ? C_CYAN : slots[i].used ? RGB(40, 40, 48)
+                                                                                                   : C_BLACK;
+        char n[4];
+        cv_rect(x + 1, y + 1, 28, 36, bgc);
+        if (!slots[i].used && sl.pending != (int)i)
+            cv_rect(x + 1, y + 1, 28, 1, C_LINE), cv_rect(x + 1, y + 36, 28, 1, C_LINE);
+        int_text((int32_t)i + 1, n);
+        cv_text(x + 15 - text_w(&FONT_S, n) / 2, y + 4, &FONT_S, n,
+                bgc == C_ORANGE || bgc == C_CYAN ? C_BLACK : slots[i].used ? C_WHITE : C_GRAY);
+        if (slots[i].used) {
+            const char *a = STYLE_ABBR[slots[i].style % MSTYLES];
+            cv_text(x + 15 - text_w(&FONT_XS, a) / 2, y + 22, &FONT_XS, a,
+                    bgc == C_ORANGE || bgc == C_CYAN ? C_BLACK : C_GRAY);
+        }
+    }
+}
 static void facility_tracks(uint32_t now)
 {
     unsigned t;
@@ -863,7 +1095,9 @@ static void draw(void)
      * the filter closes, feedback gives every hit an echo, LO-FI lays scan lines over it, an octave down sinks it */
     jungle_pattern(pat);
     cv_begin(240, 76, bg);
-    if (st.page == PAGE_FACILITY)
+    if (ui.btn >> B_ENV & 1u)
+        slots_grid();
+    else if (st.page == PAGE_FACILITY)
         facility_tracks(now);
     else {
         unsigned fx = jungle_instant_active();
@@ -1024,6 +1258,10 @@ static void draw(void)
             facility_hint(fh);
             hint = fh;
         }
+        if (ui.btn >> B_ENV & 1u)
+            hint = "KEY LOAD  +SEL VARY  +EDIT SAVE";
+        if (sl.dirty)
+            hint = "SLOT SAVED: WRITES AT STOP";
         cv_text(234 - text_w(&FONT_XS, hint), 104, &FONT_XS, hint, C_GRAY);
     }
     cv_blit(0, 114);
@@ -1044,6 +1282,7 @@ void app_frame(void)
     int step = jungle_current_step(), roll = jungle_roll_active(), playing = jungle_playing(),
         instant = (int)jungle_instant_active();
     input();
+    slots_frame();
     if (xruns != last_xruns) {               /* the render ran late: say so, as v1 did */
         if (last_xruns)
             app_say("AUDIO", "OVERLOAD");
