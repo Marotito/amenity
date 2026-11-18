@@ -45,10 +45,10 @@ jobs:
           echo "JIELI_TOOLCHAIN=$HOME/.jieli/toolchain" >> "$GITHUB_ENV"
       - name: JieLi AC79 SDK (gitee.com, the tag upstream uses)
         run: |
-          for i in 1 2 3; do
+          for i in 1 2 3 4 5 6; do   # (gitee fails now and then from GitHub's runners: more tries, longer waits)
             git clone --depth 1 --branch AC79NN_SDK_V1.2.1_2023-12-13 \
                 https://gitee.com/Jieli-Tech/fw-AC79_AIoT_SDK.git ~/fw-AC79_AIoT_SDK && break
-            rm -rf ~/fw-AC79_AIoT_SDK; sleep 20
+            rm -rf ~/fw-AC79_AIoT_SDK; sleep $((20 * i))
           done
           test -d ~/fw-AC79_AIoT_SDK
           echo "AC79_SDK=$HOME/fw-AC79_AIoT_SDK" >> "$GITHUB_ENV"
