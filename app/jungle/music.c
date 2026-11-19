@@ -832,9 +832,14 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
 enum { R_REST, R_SKANK, R_BUBBLE, R_STABS };
 static struct { float wait; int octave; float vel; int gate; int live; const struct chord *c; } pend[8];
 static int pend_n;   /* how many wait (F6a: no looking each sample when none) */
+static int mel_attack_at(uint32_t step);
 static void schedule(float delay, int octave, float vel, int gate, const struct chord *c)   /* c: a chord ahead, or 0 */
 {
     vel *= note_vel(TRK_HARMONY);
+    {   /* F7a: question and answer: a strike on a 16th the melody attacks (a bar's downbeat aside) steps back */
+        uint32_t at = g + (uint32_t)(delay / (sps > 1.0f ? sps : 1.0f) + 0.5f);
+        if (at % 16u != 0 && !heard_muted[TRK_MELODY] && mel_attack_at(at)) vel *= 0.5f;
+    }
     for (int i = 0; i < 8; ++i) if (!pend[i].live) {
         pend[i].wait = delay; pend[i].octave = octave; pend[i].vel = vel; pend[i].gate = gate;
         pend[i].live = 1; pend[i].c = c;
@@ -982,6 +987,7 @@ static void rhythm_phrase(void)
         fam_left = 2 + (int)rnd(3);
         md = pick_in(mask, fam);
     } else if (rnd(10) < 6) md = pick_in(mask, fam);
+    if (md == MD_JHEM && !heard_muted[TRK_MELODY] && (mask >> MD_JCOMP & 1u)) md = MD_JCOMP;   /* F7a: no hemiola under a melody */
 set:
     if (md == MD_STABS) { rhythm_set(R_STABS); stab_mask = STAB_PATTERNS[rnd(3)]; }
     else if (FAMILY[md] == 1) {
@@ -1255,6 +1261,41 @@ static const struct seed SEEDS[] = {
                            {8,1,1}, {9,0,1}, {7,0,1}, {8,0,1}, {9,0,2}, {6,0,1}, {8,0,2} } },   /* Joplin */
 };
 enum { NSEEDS = sizeof SEEDS / sizeof SEEDS[0] };
+/* F7a (Marote, 19 nov: the classics as written cross the break). Four seeds are in three: their bars (in 16ths) and
+ * pickup. Each becomes four the arrangers' way: the bar's last note (or rest) takes the beat the bar lacks, so its
+ * notes keep their places and the next bar starts on the beat (3/4 into 4/4: 12 -> 16; 3/8, 6/8 in 8ths: 6 -> 8;
+ * the Gymnopedie's one note a bar: 3 -> 4). The notes, the seed's identity, stay; the 4/4 seeds stay as written. */
+static const struct { uint8_t bar, pickup; } SEED_METER[NSEEDS] = {
+    { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 },
+    { 6, 2 },    /* FUR ELISE: 3/8, E D# its pickup */
+    { 12, 0 },   /* MINUET: 3/4 */
+    { 6, 2 },    /* GREENSLEEVES: 6/8's halves, A its pickup */
+    { 3, 0 },    /* GYMNOPEDIE: 3/4, a note a bar */
+    { 0, 0 }, { 0, 0 },
+};
+static struct seed SEED44[NSEEDS];
+static uint8_t seed_pickup[NSEEDS];
+static void seeds_in_four(void)
+{
+    for (int k = 0; k < NSEEDS; ++k) {
+        const struct seed *a = &SEEDS[k];
+        struct seed *b = &SEED44[k];
+        int B = SEED_METER[k].bar, P = SEED_METER[k].pickup, T = (B + 3) / 4 * 4;
+        *b = *a;
+        seed_pickup[k] = (uint8_t)P;
+        if (!B || B == T) continue;
+        int on[20], t = 0;
+        for (int i = 0; i < a->n; ++i) {   /* each onset: its bar and its place in it, the bar now T long */
+            int u = t - P;
+            on[i] = u < 0 ? t : P + (u / B) * T + u % B;
+            t += a->m[i].dur;
+        }
+        for (int i = 0; i < a->n; ++i) {
+            int d = i + 1 < a->n ? on[i + 1] - on[i] : (a->m[i].dur * T + B - 1) / B;
+            b->m[i].dur = (int8_t)(d < 1 ? 1 : d);
+        }
+    }
+}
 unsigned music_seeds(void) { return NSEEDS; }
 const char *music_seed_name(unsigned i) { return i < NSEEDS ? SEEDS[i].name : "AUTO"; }
 void music_mel_seed(unsigned i) { c_mseed = (uint8_t)(i < NSEEDS ? i : MAUTO); }
@@ -1439,6 +1480,10 @@ static void put(int at, int deg, int alt, int len, float vel)
 static int lay_seed(const struct seed *sd, int at, int shift, int inv, int aug, int upto, int end)
 {
     int d0 = sd->m[0].deg == MR ? 0 : sd->m[0].deg, n = upto < sd->n ? upto : sd->n;
+    {   /* F7a: a pickup comes before the beat, its first downbeat on one */
+        int P = seed_pickup[sd - SEED44] * aug;
+        if (P) at += (4 - (at + P) % 4) % 4;
+    }
     {   /* F6c: what fits the phrase, cut where the motif breathes (a note of 2 or more), not where it falls */
         int room = 32 - at, sum = 0, fit = 0;
         for (int i = 0; i < n; ++i) { sum += sd->m[i].dur * aug; if (sum > room) break; fit = i + 1; }
@@ -1500,7 +1545,7 @@ static void mel_plan(void)   /* the melody track's own phrase starts */
     }
     if (c_mseed != MAUTO) mel_seed_now = c_mseed;
     else if (m_phrase % 4u == 0) mel_seed_now = MSTY[st].seeds[rnd(MSTY[st].n)];
-    const struct seed *sd = &SEEDS[mel_seed_now];
+    const struct seed *sd = &SEED44[mel_seed_now];   /* (F7a: in four) */
     int answer = m_phrase & 1u;
     ++m_phrase;
     if (form_on && sect_k == S_INTRO) { put(0, sd->m[0].deg == MR ? 0 : sd->m[0].deg, 0, 28, 0.6f); return; }
@@ -1661,7 +1706,9 @@ static void mel_fit(void)
         int midi = deg_pitch(e->deg, e->alt);
         int next = i + 1 < n ? deg_pitch(mseq[on[i + 1]].deg, mseq[on[i + 1]].alt) : midi;
         if (e->alt && c->q != Q_DOM && mf_class(c, midi) != 0) midi -= e->alt;   /* a leading tone off its dominant */
-        if ((v % 4 == 0 || e->len >= 2 || i == 0) && mf_class(c, midi) >= 2) midi = mf_nearest(c, midi, next - midi, 1);
+        int edge = mel_chord_at(v + e->len) != c || (v + e->len) % 8 == 0;   /* F7a: the last note before a change or a
+                                                                                    * half bar's end (a pickup into it) */
+        if ((v % 4 == 0 || e->len >= 2 || i == 0 || edge) && mf_class(c, midi) >= 2) midi = mf_nearest(c, midi, next - midi, 1);
         mf_set(e, midi);
         /* held into a chord it clashes with: it stops there, struck again on the new chord */
         for (int w = v + 1; w < v + e->len && w < 32; ++w) {
@@ -1676,6 +1723,28 @@ static void mel_fit(void)
                 }
             }
             break;
+        }
+    }
+    /* F7a: a long note landing on the break's snare comes a 16th early (an anticipation: the jungle producers keep
+     * the lead off the backbeat), if that 16th is free */
+    {
+        float per = 2.0f / (float)(feel[TRK_MELODY] ? feel[TRK_MELODY] : 2u);   /* the break's 16ths in one of ours */
+        uint32_t g0 = g;
+        for (int v = 2; v < 32; ++v) {
+            struct mev *e = &mseq[v];
+            if (!e->on || e->len < 2) continue;
+            const struct jungle_step *st = &pat[(g0 + (uint32_t)((float)v * per + 0.5f)) % 32u];
+            if (!(st->active && (c_snares >> st->slice & 1u))) continue;
+            if (mseq[v - 1].on) continue;   /* a note there already: leave it */
+            if (mf_class(mel_chord_at(v - 1), deg_pitch(e->deg, e->alt)) >= 2) continue;   /* (it clashes a 16th early) */
+            int w = v - 2;                   /* the note sounding into it gives it up (a 16th shorter, never to nothing) */
+            while (w >= 0 && !mseq[w].on) --w;
+            if (w >= 0 && w + mseq[w].len > v - 1) {
+                if (v - 1 - w < 1) continue;
+                mseq[w].len = (int8_t)(v - 1 - w);
+            }
+            mseq[v - 1] = *e; mseq[v - 1].len = (int8_t)(e->len + 1);
+            e->on = 0;
         }
     }
     /* the cadence: the phrase's last note */
@@ -1721,6 +1790,14 @@ static void mel_sound(const struct mev *e, int v, int duck)
     if (duck) vel *= 0.63f;                                                   /* under the snare: -4 dB */
     vel = vel < 0.2f ? 0.2f : vel > 1.25f ? 1.25f : vel;
     lead_note(midi, (float)e->len * vsps(TRK_MELODY) * 0.9f * gate, vel);
+}
+static int mel_attack_at(uint32_t step)   /* 1: the melody attacks on that 16th of the break (this phrase's plan) */
+{
+    uint8_t f = feel[TRK_MELODY] ? feel[TRK_MELODY] : 2u;
+    if (form_hole(TRK_MELODY)) return 0;
+    if (f == 2) return mseq[step % 32u].on;
+    if (f == 1) return !(step & 1u) && mseq[step / 2u % 32u].on;
+    return mseq[2u * step % 32u].on || mseq[(2u * step + 1u) % 32u].on;
 }
 static void mel_step(int v)
 {
@@ -1955,6 +2032,7 @@ void music_init(void)
     pad.patch = pad_patch; rhy.patch = rhy_patch;
     for (int v = 0; v < 3; ++v) pad.v[v].fm = &fm6_pad[v];
     bass.fmb = lead.fmb = -1;
+    seeds_in_four();
     rhy.pan0 = 0.4f;
     pad.voicing[0] = rhy.voicing[0] = 60; pad.voicing[1] = rhy.voicing[1] = 64; pad.voicing[2] = rhy.voicing[2] = 67;
     rhythm_set(R_SKANK);
