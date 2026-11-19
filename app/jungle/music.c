@@ -422,7 +422,7 @@ static float ks_run(struct ks *k)
     return y;
 }
 static void ks_mute(struct ks *k, float t60) { if (k->n) k->loss = fm_expf(-6.9f * (float)k->n / (t60 * SR)); }   /* the damper */
-static float ks_bass_buf[2048] PLAT_POOL, ks_rhy_buf[3][512] PLAT_POOL, ks_lead_buf[512] PLAT_POOL;
+static float ks_rhy_buf[3][512] PLAT_POOL, ks_lead_buf[512] PLAT_POOL;
 /* the drift (F6b): an analogue's pitch wandering, a few cents, slow; one per voice, moved once a chunk */
 static float drift[8], drift_to[8];
 static void drift_chunk(unsigned n)
@@ -437,7 +437,6 @@ static void drift_chunk(unsigned n)
 /* --------------------------------------------------------------- the bass --- */
 static struct {
     int mode; float ph[3], freq, target, env, fenv, gate_left, glide, acc, vel; struct svf f, f2; int on, rising, kc;
-    struct ks str;
 } bass;
 static void bass_play(int midi, float gate_samples, int slide, int accent, float vel)
 {
@@ -449,8 +448,6 @@ static void bass_play(int midi, float gate_samples, int slide, int accent, float
         return;
     }
     bass.freq = bass.target;
-    if (bass.mode == MTIMBRE_UPRIGHT)   /* the upright: a dark pluck, near the middle; it rings ~1.6 s */
-        ks_pluck(&bass.str, bass.target, 0.18f + 0.12f * vel, 0.45f, 1.6f, 0.9f + 0.3f * (accent ? 1.0f : 0.0f), 0.0f);
     if (bass.mode == MTIMBRE_FM) bass.ph[1] = 0.0f;
     bass.glide = 0.0015f;
     bass.fenv = 1.0f;
@@ -471,7 +468,16 @@ static float bass_render(void)
     switch (bass.mode) {
     case MTIMBRE_SUB:  s = sine(bass.ph[0]); bass.ph[0] += inc; if (bass.ph[0] >= 1.0f) bass.ph[0] -= 1.0f; break;
     case MTIMBRE_ACID: s = fm_tanhf((1.2f + 2.6f * bass.acc * bass.acc) * saw(&bass.ph[0], inc)); break;   /* the 303 into a drive */
-    case MTIMBRE_UPRIGHT: s = 4.6f * ks_run(&bass.str); break;   /* (levels matched by ear-ish RMS, F6b) */
+    case MTIMBRE_UPRIGHT: {   /* FINGER (F6c, in the upright's place: Marote): a fundamental, its 2nd and 3rd dying
+                               * fast (the finger on the string), the pitch settling from a hair sharp, warmed */
+        float h = bass.fenv, p2 = bass.ph[0] * 2.0f, p3 = bass.ph[0] * 3.0f;
+        p2 -= (float)(int)p2; p3 -= (float)(int)p3;
+        s = sine(bass.ph[0]) + (0.12f + 0.45f * h) * sine(p2) + 0.25f * h * h * sine(p3);
+        s = fm_tanhf(1.3f * s) * (0.7f + 0.3f * h) * 1.15f;
+        bass.ph[0] += inc * (1.0f + 0.02f * h * h * h);
+        if (bass.ph[0] >= 1.0f) bass.ph[0] -= 1.0f;
+        break;
+    }
     case MTIMBRE_FM: {   /* two operators 1:1, the index dying fast (an accent: more) */
         float idx = (0.25f + 0.9f * bass.fenv * bass.fenv) * (0.6f + 0.4f * bass.acc);
         float ph = bass.ph[0] + idx * sine(bass.ph[1]);
@@ -498,7 +504,7 @@ static float bass_render(void)
         if (--bass.kc <= 0) {   /* the filter's coefficients: every 16 samples (F6a: the CPU) */
             int acid = bass.mode == MTIMBRE_ACID;
             float cut = acid ? 220.0f + 3200.0f * bass.fenv * bass.acc * bass.acc :
-                        bass.mode == MTIMBRE_UPRIGHT ? 700.0f + 900.0f * bass.fenv : 140.0f + 700.0f * bass.fenv;
+                        bass.mode == MTIMBRE_UPRIGHT ? 500.0f + 1600.0f * bass.fenv : 140.0f + 700.0f * bass.fenv;
             svf_set(&bass.f, g_of(cut * bass_cut), (acid ? 1.0f : 1.2f) * (acid ? 1.0f : bass_k));
             if (acid) svf_set(&bass.f2, g_of(cut * bass_cut), 0.35f * bass_k);   /* the acid: 24 dB, two of them */
             bass.kc = 16;
@@ -897,7 +903,10 @@ static int bev_note(const struct bev *e, int v)
     if (e->kind == K_SCALE) return scale_note(cur_chord, e->deg);
     if (e->deg == 5 || e->deg == 6) {   /* into the next bar's root (the track's bar, at its speed) */
         uint32_t ahead = (uint32_t)((float)(16 - v % 16) * 2.0f / (float)feel[TRK_BASS] + 0.5f);
-        return root_midi(chord_ahead(ahead)) + (e->deg == 5 ? -1 : 1);
+        const struct chord *nx = chord_ahead(ahead);
+        if (track_style(TRK_BASS) != MSTYLE_JAZZ)   /* F6c: chromatic only in the walk; elsewhere a step of its scale */
+            return scale_note(nx, e->deg == 5 ? -1 : 1);
+        return root_midi(nx) + (e->deg == 5 ? -1 : 1);
     }
     if (e->deg == 4) return root_midi(cur_chord) + 12;
     return root_midi(cur_chord) + (QUAL[cur_chord->q][e->deg] % 12);
@@ -1230,6 +1239,15 @@ static void put(int at, int deg, int alt, int len, float vel)
 static int lay_seed(const struct seed *sd, int at, int shift, int inv, int aug, int upto, int end)
 {
     int d0 = sd->m[0].deg == MR ? 0 : sd->m[0].deg, n = upto < sd->n ? upto : sd->n;
+    {   /* F6c: what fits the phrase, cut where the motif breathes (a note of 2 or more), not where it falls */
+        int room = 32 - at, sum = 0, fit = 0;
+        for (int i = 0; i < n; ++i) { sum += sd->m[i].dur * aug; if (sum > room) break; fit = i + 1; }
+        if (fit < n) {
+            int k = fit;
+            while (k > 2 && fit - k < 4 && (sd->m[k - 1].dur < 2 || sd->m[k - 1].deg == MR)) --k;
+            n = k > 2 && sd->m[k - 1].dur >= 2 ? k : fit;
+        }
+    }
     for (int i = 0; i < n && at < 32; ++i) {
         const struct mnote *m = &sd->m[i];
         int len = m->dur * aug, deg = m->deg;
@@ -1387,6 +1405,95 @@ static float mel_late(int v)   /* how late a note sounds after its 16th: the sol
     return d;
 }
 static struct { struct mev e; int v, duck; float wait; } mpend = { { 0, 0, 0, 0, 0.0f }, -1, 0, 0.0f };
+
+/* F6c, the melody hears the harmony (Marote, 19 nov: the phrases' and bars' ends sounded wrong). Planned in the
+ * key's degrees, each note now asks the chord that will sound under it (chord_ahead: the conductor knows):
+ * - a strong note (a beat, or held) is a chord tone or a tension the chord takes (in its scale, not a half step over
+ *   a chord tone); else it moves to the nearest that is, the way the line goes;
+ * - a seed's alteration (a leading tone) stays only on a dominant or where it is a chord tone;
+ * - a note held into a chord it clashes with stops at the change, struck again on the new chord's nearest tone;
+ * - the phrase's last note is a cadence on the chord really sounding: before the home chord, its 2nd, 7th or 5th
+ *   (the next phrase resolves it); elsewhere the chord's root or 3rd; held to the phrase's end. */
+static const struct chord *mel_chord_at(int v)   /* the chord under the melody's 16th v of this phrase */
+{
+    return chord_ahead((uint32_t)((float)v * 2.0f / (float)(feel[TRK_MELODY] ? feel[TRK_MELODY] : 2u)));
+}
+static int mf_class(const struct chord *c, int midi)   /* 0 a chord tone, 1 a tension, 2 an avoid note, 3 out */
+{
+    int pc = ((midi % 12) + 12) % 12, root = (key_root + c->root) % 12, ct = 0, avoid = 0;
+    for (int i = 0; i < 4; ++i) { int t = chord_pc(c, i); if (t == pc) ct = 1; if ((t + 1) % 12 == pc) avoid = 1; }
+    if (ct) return 0;
+    if (!(SCALE[c->sc] >> ((pc - root + 12) % 12) & 1u)) return 3;
+    return avoid ? 2 : 1;
+}
+static void mf_set(struct mev *e, int midi)   /* a pitch back into degrees (+ an alteration) */
+{
+    int best = 0, bp = -999;
+    for (int d = -16; d <= 24; ++d) { int p = deg_pitch(d, 0); if (p <= midi && p > bp) { bp = p; best = d; } }
+    e->deg = (int8_t)best; e->alt = (int8_t)(midi - bp);
+}
+static int mf_nearest(const struct chord *c, int midi, int dir, int worst)   /* the nearest pitch of class <= worst */
+{
+    for (int pass = 0; pass < 2; ++pass)   /* in the key's scale first, then any */
+        for (int d = 0; d <= 6; ++d)
+            for (int sgn = 0; sgn < 2; ++sgn) {
+                int m = midi + (sgn == 0 ? (dir >= 0 ? d : -d) : (dir >= 0 ? -d : d));
+                if (mf_class(c, m) > worst) continue;
+                if (pass == 0) { int ok = 0; uint16_t ks = key_scale(); if (ks >> ((((m - mel_tonic()) % 12) + 12) % 12) & 1u) ok = 1; if (!ok) continue; }
+                return m;
+            }
+    return midi;
+}
+static void mel_fit(void)
+{
+    int on[32], n = 0;
+    for (int v = 0; v < 32; ++v) if (mseq[v].on) on[n++] = v;
+    for (int i = 0; i < n; ++i) {
+        int v = on[i];
+        struct mev *e = &mseq[v];
+        const struct chord *c = mel_chord_at(v);
+        int midi = deg_pitch(e->deg, e->alt);
+        int next = i + 1 < n ? deg_pitch(mseq[on[i + 1]].deg, mseq[on[i + 1]].alt) : midi;
+        if (e->alt && c->q != Q_DOM && mf_class(c, midi) != 0) midi -= e->alt;   /* a leading tone off its dominant */
+        if ((v % 4 == 0 || e->len >= 2 || i == 0) && mf_class(c, midi) >= 2) midi = mf_nearest(c, midi, next - midi, 1);
+        mf_set(e, midi);
+        /* held into a chord it clashes with: it stops there, struck again on the new chord */
+        for (int w = v + 1; w < v + e->len && w < 32; ++w) {
+            const struct chord *cw = mel_chord_at(w);
+            if (cw == mel_chord_at(w - 1)) continue;
+            if (mf_class(cw, midi) >= 2) {
+                int rest = v + e->len - w;
+                e->len = (int8_t)(w - v);
+                if (rest >= 2 && !mseq[w].on) {
+                    mseq[w].on = 1; mseq[w].len = (int8_t)rest; mseq[w].vel = 0.75f;
+                    mf_set(&mseq[w], mf_nearest(cw, midi, 0, 0));
+                }
+            }
+            break;
+        }
+    }
+    /* the cadence: the phrase's last note */
+    n = 0;
+    for (int v = 0; v < 32; ++v) if (mseq[v].on) on[n++] = v;
+    if (!n) return;
+    {
+        int v = on[n - 1];
+        struct mev *e = &mseq[v];
+        const struct chord *c = mel_chord_at(v), *nx = mel_chord_at(32);
+        int midi = deg_pitch(e->deg, e->alt), prev = n > 1 ? deg_pitch(mseq[on[n - 2]].deg, mseq[on[n - 2]].alt) : midi;
+        int best = midi, bd = 99;
+        for (int m = prev - 7; m <= prev + 7; ++m) {
+            int pc = ((m % 12) + 12) % 12, k = key_root % 12, rel = (pc - k + 12) % 12, ok;
+            if (mf_class(c, m) != 0) continue;
+            if (nx->root == 0 && c->root != 0) ok = rel == 2 || rel == 10 || rel == 11 || rel == 7;   /* before home */
+            else ok = pc == chord_pc(c, 0) || pc == chord_pc(c, 1);                                   /* root or 3rd */
+            if (ok && iabs(m - prev) < bd) { bd = iabs(m - prev); best = m; }
+        }
+        if (bd == 99) best = mf_nearest(c, midi, prev - midi, 0);
+        mf_set(e, best);
+        if (32 - (v + e->len) > 0 && 32 - (v + e->len) <= 6) e->len = (int8_t)(32 - v);   /* held to the end */
+    }
+}
 static void mel_sound(const struct mev *e, int v, int duck)
 {
     float E = mel_expr();
@@ -1411,7 +1518,7 @@ static void mel_sound(const struct mev *e, int v, int duck)
 }
 static void mel_step(int v)
 {
-    if (v == 0) { mel_plan(); mel_shape(); }
+    if (v == 0) { mel_plan(); mel_fit(); mel_shape(); }
     if (form_hole(TRK_MELODY)) { if (lead.stage != 3) lead.stage = 3; mpend.v = -1; return; }
     if (!mseq[v].on) return;
     uint32_t step = g % 32u;
@@ -1640,7 +1747,6 @@ void music_init(void)
     rhythm_set(R_SKANK);
     bass.mode = MTIMBRE_REESE;
     bass.vel = 1.0f;
-    bass.str.b = ks_bass_buf; bass.str.cap = 2048;   /* the strings' lines (F6b) */
     for (int v = 0; v < 3; ++v) { rhy.v[v].str.b = ks_rhy_buf[v]; rhy.v[v].str.cap = 512; }
     lead.str.b = ks_lead_buf; lead.str.cap = 512;
     for (int t = 0; t < TRACKS; ++t) for (int i = 0; i < 3; ++i) tq[t][i].v = -1;

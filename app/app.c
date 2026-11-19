@@ -104,7 +104,7 @@ static struct {
 enum { FOC_BASE, FOCUSES = TRACKS + 1 };
 static const char *const TRACK_NAME[TRACKS] = {"BREAK", "BASS", "HARMONY", "MELODY"};
 static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID", "WALK", "1 DROP", "RIFF"};
-static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE", "UPRIGHT", "FM BASS", "DUB"};
+static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE", "FINGER", "FM BASS", "DUB"};
 static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "STABS", "PAD", "MIX+PAD"};
 static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW", "EPIANO", "CLAVI", "HARPSI", "GUITAR", "BRASS"};
 static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB"};
