@@ -15,6 +15,13 @@ Files with another licence keep it; each names its licence in its first lines
 - `app/app.h`, and the parts of `app/app.c` taken from fm1-base's template:
   MPL-2.0, Copyright (C) 2026 Charles Vestal. MPL-2.0 allows them in this
   GPL-3.0 work (its section 3.3); they stay available under MPL-2.0.
+- Facility's FM (Amenity+ F6d): `app/jungle/fm6_core.h`, msfa (Copyright 2012
+  Google Inc.; 2016-2025 Pascal Gauthier, Dexed) in the integer C port of
+  Felucca (Leo Kuroshita, Hügelton Instruments), Apache-2.0; and
+  `app/jungle/fm6_factory.h`, M-VAVE's factory DX7 bank (V15, 128 voices,
+  from github.com/m-vave/fm1_open), Apache-2.0. The licence:
+  `LICENSES/Apache-2.0.txt`. The tables (`app/jungle/fm6_tables.h`) come from
+  `tools/gen_fm6_tables.py`, whose formulas are Felucca's (GPL-3.0-only).
 - The SEA codec files (`app/jungle/sea_decode.c`,
   `app/jungle/jungle_sea_dqt.inc`, `tools/jungle/sea/sea_encode.h`,
   `web/breaks/sea.js`): MIT, below.

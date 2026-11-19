@@ -106,7 +106,6 @@ static const char *const TRACK_NAME[TRACKS] = {"BREAK", "BASS", "HARMONY", "MELO
 static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID", "WALK", "1 DROP", "RIFF"};
 static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE", "FINGER", "FM BASS", "DUB"};
 static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "STABS", "PAD", "MIX+PAD"};
-static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW", "EPIANO", "CLAVI", "HARPSI", "GUITAR", "BRASS"};
 static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB"};
 static const char *const MEL_MODE[MMEL_MODES] = {"SEED", "RIFF", "LINE", "ANSWER"};
 static const char *const MEL_SOUND[MMSOUNDS] = {"SAW", "SQUARE", "FM BELL", "REED", "STRING", "FLUTE", "VIBES", "PLUCK", "BRASS"};
@@ -830,7 +829,7 @@ static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
             app_say("BASS SOUND", fac.bass_sound == MAUTO ? "AUTO" : BASS_SOUND[fac.bass_sound]);
         } else if (f == TRK_HARMONY) {
             music_harm_sound(fac.harm_sound = auto_turn(fac.harm_sound, e[EN_PRESET], MHSOUNDS));
-            app_say("HARMONY SOUND", fac.harm_sound == MAUTO ? "AUTO" : HARM_SOUND[fac.harm_sound]);
+            app_say("HARMONY SOUND", fac.harm_sound == MAUTO ? "AUTO" : music_harm_sound_name(fac.harm_sound));
         } else if (f == TRK_MELODY) {
             music_mel_sound(fac.mel_sound = auto_turn(fac.mel_sound, e[EN_PRESET], MMSOUNDS));
             app_say("MELODY SOUND", fac.mel_sound == MAUTO ? "AUTO" : MEL_SOUND[fac.mel_sound]);
@@ -1125,7 +1124,7 @@ static void facility_tracks(uint32_t now)
             if (mv.harm_pad && mv.harm_detail[0])
                 text_cat(what, "+P");
             text_cat(what, "/");
-            text_cat(what, HARM_SOUND[mv.harm_sound]);
+            text_cat(what, music_harm_sound_name(mv.harm_sound));
         } else {
             if (fac.mel_mode == MAUTO)
                 text_cat(what, "A:");

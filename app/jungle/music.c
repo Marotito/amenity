@@ -22,6 +22,9 @@
 #include "jungle_libc.h"
 #include "fastmath.h"
 #include "plat.h"   /* PLAT_POOL: the effects' lines (F6a) */
+#include "fm6_tables.h"    /* F6d: the FM6 core's tables (tools/gen_fm6_tables.py) */
+#include "fm6_core.h"      /* F6d: msfa (Dexed's 6-operator FM), Felucca's integer C port, Apache-2.0 */
+#include "fm6_factory.h"   /* F6d: M-VAVE's factory DX7 bank, 128 voices, Apache-2.0 */
 
 #define SR 44100.0f
 
@@ -130,7 +133,7 @@ static const struct style STYLE[MSTYLES] = {
         { "MIXO", 4, { {0,Q_MAJ,S_MIX,4,"I"}, {10,Q_MAJ,S_ION,4,"bVII"}, {5,Q_MAJ,S_LYD,4,"IV"}, {0,Q_MAJ,S_MIX,4,"I"} } },
         { "BLUES 8", 7, { {0,Q_MIN,S_BLUES,8,"i7"}, {5,Q_MIN,S_DOR,4,"iv7"}, {0,Q_MIN,S_BLUES,4,"i7"}, {7,Q_DOM,S_PHRDOM,4,"V7"},
                           {5,Q_MIN,S_DOR,4,"iv7"}, {0,Q_MIN,S_BLUES,4,"i7"}, {7,Q_DOM,S_PHRDOM,4,"V7"} } } },
-      { 0, 20, 20, 0, 0, 0, 60 }, MTIMBRE_SUB, B(MD_A) | B(MD_B) | B(MD_JCOMP), 40, MHSOUND_EPIANO, 0 },
+      { 0, 20, 20, 0, 0, 0, 60 }, MTIMBRE_SUB, B(MD_A) | B(MD_B) | B(MD_JCOMP), 40, MHSOUND_BANK + 7, 0 },   /* PIANO 8 (F6d) */
     { "DUB", 85.0f, {
         { "ONE CHORD", 1, { {0,Q_MIN,S_AEO,16,"i"} } },
         { "I-VII", 2, { {0,Q_MIN,S_AEO,8,"i"}, {10,Q_MAJ,S_MIX,8,"VII"} } },
@@ -521,9 +524,91 @@ static float bass_render(void)
 }
 
 /* ------------------------------------------------------- a 3-voice layer --- */
-enum { T_STRINGS, T_ORGAN, T_STAB, T_EPIANO, T_CLAVI, T_HARPSI, T_GUITAR, T_BRASS };
+enum { T_STRINGS, T_ORGAN, T_STAB, T_EPIANO, T_CLAVI, T_HARPSI, T_GUITAR, T_BRASS, T_FM6 };
+/* ------------------------------------------------------------ FM6 (F6d) --- */
+/* Marote (19 nov): the FM-1's own sounds are a DX7's, six operators; ours were two (a Sega Genesis's). So: msfa, the
+ * DX7 engine of Dexed, in Felucca's integer C port (fm6_core.h), playing M-VAVE's factory bank (fm6_factory.h), both
+ * Apache-2.0. A voice renders its own 32-sample blocks (from the sample it is struck: no block's wait), each block
+ * standing alone (its note, its LFO, its patch: a copy, so a sound changed mid-note never touches it) -- the shape
+ * a job for the second core needs. The patch: the 128-byte packed record unpacked to the 155-byte layout (Felucca's
+ * eng_fm6.c fm6_unpack, GPL-3.0-only). */
+struct fm6v { fm6_note_t n; fm6_lfo_t lfo; uint8_t p[FP_SIZE + 1]; float buf[FM6_N]; int pos, done; };
+static void fm6_unpack(const uint8_t *b, uint8_t *v)
+{
+    uint32_t k, i;
+    for (k = 0; k < 6u; k++) {
+        const uint8_t *o = b + k * 17u;
+        uint8_t *d = v + k * FP_OP;
+        for (i = 0; i < 11u; i++) d[i] = o[i] & 0x7Fu;
+        d[FP_LC] = o[11] & 3u; d[FP_RC] = (o[11] >> 2) & 3u;
+        d[FP_RS] = o[12] & 7u; d[FP_DET] = (o[12] >> 3) & 15u;
+        d[FP_AMS] = o[13] & 3u; d[FP_KVS] = (o[13] >> 2) & 7u;
+        d[FP_OL] = o[14] & 0x7Fu;
+        d[FP_MODE] = o[15] & 1u; d[FP_FC] = (o[15] >> 1) & 31u;
+        d[FP_FF] = o[16] & 0x7Fu;
+    }
+    for (i = 0; i < 9u; i++) v[FP_PR1 + i] = b[102 + i] & 0x7Fu;   /* pitch EG, algorithm */
+    v[FP_ALG] &= 31u;
+    v[FP_FB] = b[111] & 7u; v[FP_OKS] = (b[111] >> 3) & 1u;
+    for (i = 0; i < 4u; i++) v[FP_LFS + i] = b[112 + i] & 0x7Fu;
+    v[FP_LKS] = b[116] & 1u; v[FP_LFW] = (b[116] >> 1) & 7u; v[FP_LPMS] = (b[116] >> 4) & 7u;
+    v[FP_TRNSP] = b[117] & 0x7Fu;
+    for (i = 0; i < 10u; i++) v[FP_NAME + i] = b[118 + i] & 0x7Fu;
+}
+static void fm6_strike(struct fm6v *f, const uint8_t *patch, int midi, float vel)
+{
+    int v127 = (int)(vel * 100.0f);
+    memcpy(f->p, patch, FP_SIZE);
+    fm6_note_init(&f->n, f->p, midi + (int)f->p[FP_TRNSP] - 24, v127 < 1 ? 1 : v127 > 127 ? 127 : v127, 1);
+    fm6_lfo_reset(&f->lfo, f->p);
+    fm6_lfo_key(&f->lfo);
+    f->pos = FM6_N;   /* its first block: now */
+    f->done = 0;
+}
+static void fm6_block(struct fm6v *f, int midi)   /* the next 32 samples (floats, a carrier at full ~ 0.5) */
+{
+    int32_t bus[FM6_N], dt[6] = { 0, 0, 0, 0, 0, 0 };
+    int32_t lv = fm6_lfo_sample(&f->lfo), ld = fm6_lfo_delay(&f->lfo);
+    int32_t lf = fm6_note_logfreq((midi + (int)f->p[FP_TRNSP] - 24) * 16, 0);
+    f->pos = 0;
+    if (!fm6_note_compute(&f->n, f->p, bus, lv, ld, lf, f->p[FP_ALG], f->p[FP_FB], dt, 0)) {
+        for (int i = 0; i < FM6_N; ++i) f->buf[i] = 0.0f;
+        if (fm6_note_done(&f->n, f->p, f->p[FP_ALG])) f->done = 1;
+        return;
+    }
+    for (int i = 0; i < FM6_N; ++i) {   /* (Felucca's DC blocker: FM puts sidebands at 0 Hz) */
+        int32_t x = bus[i] - f->n.dc;
+        f->n.dc += x >> 10;
+        f->buf[i] = (float)x * (0.5f / 16777216.0f);
+    }
+}
+static struct fm6v fm6_rhy[3];
+static uint8_t rhy_patch[FP_SIZE + 1];
+/* the harmony's sounds from the bank (after the seven of ours; EPIANO plays PIANO 1 since F6d): the pianos (1, 5, 7, 8:
+ * the DX7's Rhodes), organs, guitars, brass, strings, pads */
+static const uint8_t HBANK[] = {
+    0, 4, 8, 12, 16, 20, 24, 28,  1, 5, 9, 13, 17, 21, 25, 29,  32, 36, 40, 44, 48, 52, 56, 60,
+    33, 37, 41, 45, 49, 53, 57, 61,  64, 68, 72, 76, 80, 84, 88, 92,  66, 70, 74, 78, 82, 86, 90, 94,
+    3, 7, 11, 15, 19, 23, 27, 31 };
+enum { HS_OURS = MHSOUND_BANK };
+static int hbank_of(int snd) { return snd == MHSOUND_EPIANO ? 0 : snd >= HS_OURS && snd < HS_OURS + (int)sizeof HBANK ? HBANK[snd - HS_OURS] : -1; }
+static char hs_name[12];
+const char *music_harm_sound_name(unsigned snd)
+{
+    static const char *const OURS[HS_OURS] = { "ORGAN", "SAW", "EPIANO", "CLAVI", "HARPSI", "GUITAR", "BRASS" };
+    if (snd < HS_OURS) return OURS[snd];
+    int b = hbank_of((int)snd);
+    if (b < 0) return "?";
+    int n = 0;
+    for (int i = 0; i < 10; ++i) hs_name[n++] = (char)(FM6_BANK[b][118 + i] & 0x7F);
+    while (n > 0 && hs_name[n - 1] == ' ') --n;
+    hs_name[n] = 0;
+    for (int i = 0; i < n; ++i) if (hs_name[i] >= 'a' && hs_name[i] <= 'z') hs_name[i] = (char)(hs_name[i] - 32);
+    return hs_name;
+}
 #define T_PLUCKED(t) ((t) == T_CLAVI || (t) == T_HARPSI || (t) == T_GUITAR)
-struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc, kind; struct svf f; struct ks str; };
+struct fm6v;   /* F6d: a voice's FM6 note (below) */
+struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc, kind, midi; struct svf f; struct ks str; struct fm6v *fm; };
 struct layer {
     struct voice v[3]; int voicing[3], lo, hi;
     int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0, dec0, rel0;
@@ -569,7 +654,8 @@ static void layer_chord(struct layer *L, const struct chord *c, const int idx[3]
     down ^= 1;
     for (int v = 0; v < 3; ++v) {
         struct voice *h = &L->v[v];
-        h->freq = mtof((float)(L->voicing[v] + 12 * octave_up));
+        h->midi = L->voicing[v] + 12 * octave_up;
+        h->freq = mtof((float)h->midi);
         if (!legato || h->stage == 0 || h->stage == 3) { h->stage = 1; if (!legato) h->env = 0; }
         h->fenv = 1.0f;
         h->kc = 0;
@@ -598,6 +684,7 @@ static void voice_strike(struct voice *h, int kind)   /* F6b: a voice sounds as 
     case T_HARPSI: ks_pluck(&h->str, hz, 0.9f, 0.08f, 2.2f, v, 0.07f); break;     /* brighter still, the quill */
     case T_GUITAR: ks_pluck(&h->str, hz, 0.45f, 0.3f, 0.35f, v, 0.2f); break;     /* the palm on it: short */
     case T_EPIANO: case T_BRASS: h->ph[0] = h->ph[1] = h->ph[2] = 0.0f; break;
+    case T_FM6: if (h->fm) fm6_strike(h->fm, rhy_patch, h->midi, v); else h->kind = T_STAB; break;
     default: break;
     }
 }
@@ -643,6 +730,14 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
                 s = 1.4f * s - 0.6f * svf_run(&h->f, s);
             }
             break;
+        case T_FM6: {   /* F6d: its own blocks; the gate's end lifts the keys; done when its carriers are */
+            struct fm6v *f = h->fm;
+            if (h->stage == 3 && f->n.down) fm6_note_key(&f->n, f->p, 0);
+            if (f->pos >= FM6_N) fm6_block(f, h->midi);
+            s = f->buf[f->pos++];
+            if (f->done) h->stage = 0;
+            break;
+        }
         case T_BRASS: {   /* saws through a filter that swells open and falls back (a section's stab) */
             s = 0.5f * (saw(&h->ph[0], inc * 1.0035f) + saw(&h->ph[1], inc * 0.9965f));
             if (--h->kc <= 0) {
@@ -664,7 +759,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
             h->fenv *= 0.9992f;
             break;
         }
-        s *= h->env * L->gain * h->vel;
+        s *= h->env * L->gain * (h->kind == T_FM6 ? 1.0f : h->vel);   /* (FM6: the velocity is in its operators) */
         float pan = L->pan0 + 0.2f * (float)v;
         *l += s * (1.0f - pan);
         *r += s * pan;
@@ -834,6 +929,12 @@ set:
     {   /* the sound the figure is played on (F6b); dub in AUTO: the guitar chops the skank, the organ bubbles */
         int snd = harm_sound_now;
         if (c_hsound == MAUTO && snd == MHSOUND_GUITAR && md == MD_C) snd = MHSOUND_ORGAN;
+        int bk = hbank_of(snd);
+        if (bk >= 0) {   /* F6d: a voice of the bank; its own envelopes shape it (the layer's: open, a long release) */
+            fm6_unpack(FM6_BANK[bk], rhy_patch);
+            layer_shape(&rhy, T_FM6, 0.3f, 50, 1.0f, 6000, 0, 0, 1.0f, 0.5f);
+            snd = -1;
+        }
         switch (snd) {
         case MHSOUND_SAW:
             if (md != MD_STABS) { rhy.timbre = T_STAB; rhy.cut = 1100.0f; rhy.famt = 2600.0f; rhy.k = 0.9f; rhy.gain *= 0.8f; }
@@ -863,6 +964,9 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
         rhythm_on = 0;
         pad_on = 1;
         rhythm_set(R_STABS); rhy.sus = 0.5f;
+        fm6_unpack(FM6_BANK[1], rhy_patch);   /* F6d: the dearest: ORGAN 1, six carriers, held */
+        layer_shape(&rhy, T_FM6, 0.3f, 50, 1.0f, 6000, 0, 0, 1.0f, 0.5f);
+        for (int v = 0; v < 3; ++v) rhy.v[v].kind = 0;
         layer_chord(&rhy, cur_chord, TRIAD, 1, 0.6f, 0, 1, 0.0f);
         return;
     }
@@ -1747,7 +1851,7 @@ void music_init(void)
     rhythm_set(R_SKANK);
     bass.mode = MTIMBRE_REESE;
     bass.vel = 1.0f;
-    for (int v = 0; v < 3; ++v) { rhy.v[v].str.b = ks_rhy_buf[v]; rhy.v[v].str.cap = 512; }
+    for (int v = 0; v < 3; ++v) { rhy.v[v].str.b = ks_rhy_buf[v]; rhy.v[v].str.cap = 512; rhy.v[v].fm = &fm6_rhy[v]; }
     lead.str.b = ks_lead_buf; lead.str.cap = 512;
     for (int t = 0; t < TRACKS; ++t) for (int i = 0; i < 3; ++i) tq[t][i].v = -1;
     bass_slide = ms_coef(25.0f);
