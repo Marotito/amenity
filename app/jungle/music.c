@@ -70,7 +70,43 @@ static float g_of(float hz)   /* tan(pi f / SR), a polynomial: no libm per sampl
     return x * (1.0f + x2 * (0.33333f + x2 * 0.13333f));
 }
 #define MUS_AI static inline __attribute__((always_inline))   /* OPT: a helper the RAM code uses: no copy in the flash */
-MUS_AI float soft(float x) { return x / (1.0f + fm_fabsf(x)); }
+/* fastmath.h's, as they are, always inlined (the compiler may keep a plain static inline out of line, in the flash) */
+typedef union { float f; uint32_t u; int32_t i; } mus_bits_t;
+MUS_AI float mus_fabsf(float x) { mus_bits_t b; b.f = x; b.u &= 0x7FFFFFFFu; return b.f; }
+MUS_AI float mus_exp2f(float x)
+{
+    if (x < -126.0f) return 0.0f;
+    if (x > 127.0f) x = 127.0f;
+    float y = x + 0.5f, fl = (float)(int32_t)y;
+    fl = fl > y ? fl - 1.0f : fl;
+    int32_t n = (int32_t)fl;
+    float f = x - fl, p;
+    if (n < -126) return 0.0f;
+    p = 1.534580891e-04f;
+    p = p * f + 1.339993158e-03f;
+    p = p * f + 9.618488972e-03f;
+    p = p * f + 5.550328776e-02f;
+    p = p * f + 2.402264689e-01f;
+    p = p * f + 6.931472057e-01f;
+    p = p * f + 1.0f;
+    mus_bits_t b; b.f = p; b.i += n << 23;
+    return b.f;
+}
+MUS_AI float mus_tanhf(float x)
+{
+    float a = mus_fabsf(x), e, r;
+    if (a < 0.0004f) return x;
+    if (a < 0.5f) {
+        float z = x * x;
+        return x * (1.0f + z * (-0.333333333f + z * (0.133333333f + z * (-0.0539682540f + z * (0.0218694885f +
+                    z * (-0.00886323552f + z * 0.00359212803f))))));
+    }
+    if (a > 9.0f) return x > 0.0f ? 1.0f : -1.0f;
+    e = mus_exp2f(2.0f * FM_LOG2E * a);
+    r = 1.0f - 2.0f / (e + 1.0f);
+    return x > 0.0f ? r : -r;
+}
+MUS_AI float soft(float x) { return x / (1.0f + mus_fabsf(x)); }
 static float sine_tab[1024];
 MUS_AI float sine(float ph) { return sine_tab[(int)(ph * 1024.0f) & 1023]; }
 static float ms_coef(float ms) { return 1.0f - fm_expf(-1.0f / (ms * 0.001f * SR)); }
@@ -2143,7 +2179,7 @@ MUS_AI float echo_tick(float in, float fb, float lp_k, float wobble)
     /* round the loop: darker (the colour), no rumble (~120 Hz), the tape's saturation */
     fx.e_lp += (y - fx.e_lp) * lp_k;
     fx.e_hp += (fx.e_lp - fx.e_hp) * 0.034f;
-    float w = in + fm_tanhf(1.2f * fb * (fx.e_lp - fx.e_hp)) * (1.0f / 1.2f);
+    float w = in + mus_tanhf(1.2f * fb * (fx.e_lp - fx.e_hp)) * (1.0f / 1.2f);
     w = w > 3.9f ? 3.9f : w < -3.9f ? -3.9f : w;
     echo_buf[fx.e_w & (ECHO_N - 1u)] = (int16_t)(w * 8192.0f);
     ++fx.e_w;
@@ -2303,7 +2339,7 @@ static PLAT_RAM_CODE __attribute__((noinline)) void mix_chunk(int32_t *lr, unsig
                 else room_tick(0.5f * (fx.in_r + 0.5f * eo), p->rg, 0.3f, &l, &r);
                 fx.e_out0 = fx.e_out1; fx.e_out1 = eo;
                 fx.r_l0 = fx.r_l1; fx.r_l1 = l; fx.r_r0 = fx.r_r1; fx.r_r1 = r;
-                if (fm_fabsf(eo) + fm_fabsf(l) > 1e-4f) fx.idle = 0;
+                if (mus_fabsf(eo) + mus_fabsf(l) > 1e-4f) fx.idle = 0;
             } else fx.e_out0 = fx.e_out1 = fx.r_l0 = fx.r_l1 = fx.r_r0 = fx.r_r1 = 0.0f;
             fx.in_e = fx.in_r = 0.0f;
             dl += p->ret * (0.5f * (fx.e_out0 + fx.e_out1) + 0.5f * (fx.r_l0 + fx.r_l1));
@@ -2317,7 +2353,7 @@ static PLAT_RAM_CODE __attribute__((noinline)) void mix_chunk(int32_t *lr, unsig
                                            * Amenity alone stays bit for bit) */
             float L = 0.75f * soft(1.2f * dl), R = 0.75f * soft(1.2f * dr);
             float tl = (float)a * (1.0f / 8388607.0f) + L, tr = (float)c * (1.0f / 8388607.0f) + R;
-            float al = fm_fabsf(tl), ar = fm_fabsf(tr);
+            float al = mus_fabsf(tl), ar = mus_fabsf(tr);
             if (al > 0.89f) { float y = 0.89f + 0.11f * soft((al - 0.89f) * (1.0f / 0.11f)); tl = tl < 0.0f ? -y : y; }
             if (ar > 0.89f) { float y = 0.89f + 0.11f * soft((ar - 0.89f) * (1.0f / 0.11f)); tr = tr < 0.0f ? -y : y; }
             a = (int32_t)(tl * 8388607.0f);
