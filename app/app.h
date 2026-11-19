@@ -11,6 +11,7 @@
 #define APP_BLOCK 256u                   /* frames per audio block: 5.8 ms at 44.1 kHz */
 #define APP_TICK                         /* app_tick: MIDI clock in and out, 1 kHz */
 #define APP_USB_CMD                      /* app_usb_cmd: your own breaks from the breaks page (user_breaks.c) */
+#define APP_OVERLOAD                     /* app_overload: a block over 90 % of its time: Facility's FM6 voices give way */
 
 /* the store: the app's objects, the panel calibration (the platform's) and Bluetooth's address and pairing among
  * them, and their flash offsets */
@@ -23,6 +24,7 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12);   /* audio interr
 void app_tick(void);                     /* 1 kHz, in the timer interrupt that takes in USB and TRS MIDI */
 void app_usb_cmd(const uint8_t *d, uint32_t n);   /* a frame for the app in the update's framing: main loop */
 void app_panic(void);                    /* silence now (before an update rewrites the flash) */
+void app_overload(void);                 /* audio interrupt, after a block that took over 90 % of its time */
 void app_ui_init(void);                  /* the first screen, after the splash */
 void app_frame(void);                    /* the UI: input and a redraw, about 60 times a second */
 void app_input_only(void);               /* between frames: input only */

@@ -17,7 +17,10 @@
  */
 /* Amenity+ F6d (2026, Marote's fork): taken from Felucca 1.8 (github.com/hugelton/Felucca, firmware/src/fm6_core.c)
  * as it is, but for this note and two lines: the buses on the caller's stack always (Felucca with two cores), so the
- * render can move to the second core; FM6_N is the 32-sample block (CTL, app/jungle/fm6_tables.h). */
+ * render can move to the second core; FM6_N is the 32-sample block (CTL, app/jungle/fm6_tables.h).
+ * Amenity+ OPT (2026): the renderer (fm6_core_render and its two operator loops) runs from RAM (plat.h
+ * PLAT_RAM_CODE: out of the flash cache's way), reading a RAM copy of the sine (fm6_sine, filled by fm6_core_init);
+ * the helpers it uses are always inlined, so it calls nothing in the flash. The same arithmetic. */
 /* FM6 core: msfa (the 6-operator FM synthesis core of Dexed, Source/msfa) ported to C.
  * Kept from msfa: its envelope (env.cc, with ACCURATE_ENVELOPE), pitch envelope (pitchenv.cc), LFO (lfo.cc),
  * note set-up (the note: level / rate scaling, velocity, operator pitch) and its renderer (fm_core.cc,
@@ -49,12 +52,15 @@ enum {
 
 /* ---------------------------------------------------------------- math --- */
 /* 2^(x / 2^24), Q24 (msfa Exp2::lookup): the Q30 mantissa from FM6_EXP2, shifted by the integer part */
-static inline uint32_t fm6_mant(int32_t x)
+#define FM6_AI static inline __attribute__((always_inline))
+static int16_t fm6_sine[1025];   /* OPT: SINE, in RAM (fm6_core_init) */
+static void fm6_core_init(void) { for (int i = 0; i < 1025; ++i) fm6_sine[i] = SINE[i]; }
+FM6_AI uint32_t fm6_mant(int32_t x)
 {
     uint32_t f = (uint32_t)x & 0xFFFFFFu, k = f >> 14, a = FM6_EXP2[k];
     return (1u << 30) + a + (uint32_t)(((uint64_t)(FM6_EXP2[k + 1u] - a) * (f & 0x3FFFu)) >> 14);
 }
-static inline int32_t fm6_exp2(int32_t x)
+FM6_AI int32_t fm6_exp2(int32_t x)
 {
     int32_t i = x >> 24;
     uint32_t m = fm6_mant(x);
@@ -70,9 +76,9 @@ static inline int32_t fm6_freq(int32_t x)
     return (int32_t)(q >> (21 - (i > 21 ? 21 : i)));
 }
 /* sine of a Q24 phase (one cycle = 2^24), Q15, linear between SINE's 1024 points (its 1025th = the 1st) */
-static inline int32_t fm6_sin(int32_t ph)
+FM6_AI int32_t fm6_sin(int32_t ph)
 {
-    const int16_t *s = &SINE[((uint32_t)ph >> 14) & 1023u];
+    const int16_t *s = &fm6_sine[((uint32_t)ph >> 14) & 1023u];
     return s[0] + (((s[1] - s[0]) * (int32_t)(ph & 0x3FFF)) >> 14);
 }
 
@@ -335,7 +341,7 @@ typedef struct {                 /* msfa FmOpParams */
         out[i] STORE (int32_t)(((int64_t)fm6_sin(PH) * g) >> 15);               \
         phase = (int32_t)((uint32_t)phase + (uint32_t)freq);                    \
     }
-static __attribute__((noinline)) void fm6_op_run(int32_t *out, const int32_t *in, int32_t phase, int32_t freq,
+static PLAT_RAM_CODE __attribute__((noinline)) void fm6_op_run(int32_t *out, const int32_t *in, int32_t phase, int32_t freq,
                                                  int32_t g1, int32_t g2, int add)
 {
     int32_t dg = (g2 - g1 + (FM6_N >> 1)) >> FM6_LG_N, g = g1;
@@ -351,7 +357,7 @@ static __attribute__((noinline)) void fm6_op_run(int32_t *out, const int32_t *in
 }
 
 /* the operator with feedback (fb: its last two outputs) */
-static __attribute__((noinline)) void fm6_op_fb(int32_t *out, int32_t phase, int32_t freq, int32_t g1, int32_t g2,
+static PLAT_RAM_CODE __attribute__((noinline)) void fm6_op_fb(int32_t *out, int32_t phase, int32_t freq, int32_t g1, int32_t g2,
                                                 int32_t *fb, int32_t shift, int add)
 {
     int32_t dg = (g2 - g1 + (FM6_N >> 1)) >> FM6_LG_N, g = g1, y0 = fb[0], y = fb[1];
@@ -372,7 +378,7 @@ static __attribute__((noinline)) void fm6_op_fb(int32_t *out, int32_t phase, int
  * the first carrier sounding writes it, the next ones add. Returns 0 when none sounded (out untouched). The two buses
  * are this call's (a bus is read only after this call wrote it: has[]): with two cores on the stack (each core its
  * own), with one in .bss as up to 1.6 (the ISR's stack as it was) */
-static int fm6_core_render(int32_t *out, fm6_op_t *op, uint32_t alg, int32_t *fb, int32_t fb_shift)
+static PLAT_RAM_CODE __attribute__((noinline)) int fm6_core_render(int32_t *out, fm6_op_t *op, uint32_t alg, int32_t *fb, int32_t fb_shift)
 {
     int32_t fm6_bus[2][FM6_N];
     const uint8_t *a = FM6_ALG[alg & 31u];
@@ -541,7 +547,7 @@ static int fm6_note_compute(fm6_note_t *n, const uint8_t *p, int32_t *out, int32
             level += modlvl;
         n->op[k].level_in = level < 0 ? 0 : level > (17 << 24) ? 17 << 24 : level;
     }
-    return fm6_core_render(out, n->op, alg, n->fb, fb ? 8 - fb : 16);
+    return PLAT_FAR(fm6_core_render)(out, n->op, alg, n->fb, fb ? 8 - fb : 16);   /* (OPT: in RAM) */
 }
 
 /* the note can be dropped: every carrier silent for good (released and done, or held at a silent

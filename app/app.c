@@ -10,7 +10,8 @@
  *   PRESET the break (the built-in ones, then your own: user_breaks.c)  ALGORITHM transpose (down)
  *   SELECT tempo (1 BPM; SEL held: 0.1)  SEL + OCT- / OCT+ 0.1 BPM  OCT- / OCT+ halve / double tempo
  *   PLAY start/stop  REC freeze  SEQ fill  HOME straight break
- *   EDIT held: the audio's CPU load in the header
+ *   EDIT held: the audio's CPU load in the header, and its parts (B the break, T the tracks, F the effects; FM6
+ *              voices sounding / allowed, - those the governor let go)
  *   ENV: EQ page (K1-K4: 100 Hz, 500 Hz, 2.5 kHz, 8 kHz)  FX tap: FX page (K1 saturation, K2 compression, K3 LO-FI)
  *   MIDI clock: a Start or Continue from an input leads (EXT; PLAY and tempo rest); on its own clock AMENITY
  *   sends Start, clock and Stop.
@@ -34,6 +35,15 @@ static uint32_t now_ticks(void) { return plat_ms() * (PLAT_TICKS_PER_US * 1000u)
 static uint32_t now_ticks(void) { return plat_ticks24(); }
 #endif
 
+/* the meter (EDIT held, Amenity+ OPT): the break's, the tracks' and the mix's share of the block's time, smoothed as
+ * the platform's CPU figure (about 16 blocks), in 1/4096 */
+static uint32_t meter_q[3];
+static void meter_add(int k, uint32_t ticks, uint32_t n)
+{
+    uint32_t budget = n * (PLAT_TICKS_PER_US * 1000000u / 1000u) / 44u;   /* (24 MHz / 44.1 kHz ~ 544.2 ticks a frame) */
+    uint32_t x = ticks > budget * 4u ? 16384u : ticks * 4096u / (budget ? budget : 1u);
+    meter_q[k] = (meter_q[k] * 15u + x + 8u) / 16u;
+}
 void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
 {
     uint32_t i;
@@ -41,13 +51,22 @@ void app_render(int32_t *lr, uint32_t n, uint32_t master_q12)
         lr[i] = 0;
     if (muted)
         return;
+    uint32_t t0 = plat_ticks24();
     jungle_render(lr, n, now_ticks() + HEARD_TICKS);
+    meter_add(0, plat_ticks24() - t0, n);
     music_render(lr, n);                     /* Facility: the break's mute and level, the tracks beside it */
+    {
+        struct music_meter m;
+        music_meter(&m);
+        meter_add(1, m.vox, n);
+        meter_add(2, m.fx, n);
+    }
     for (i = 0; i < 2u * n; i++)
         lr[i] = mul_shr(lr[i], (int32_t)master_q12, 12);
 }
 
 void app_panic(void) { muted = 1; }
+void app_overload(void) { music_overload(); }   /* (Amenity+ OPT: the governor) */
 
 /* ------------------------------------------------------------- MIDI clock --- */
 /* Clock out: the engine passes each message with its time (audio interrupt), the tick sends it then. */
@@ -143,6 +162,7 @@ static uint8_t etime_turn(uint8_t v, int32_t d)
 }
 static void text_cat(char *d, const char *s);
 static void int_text(int32_t v, char *t);
+static unsigned text_len(const char *s) { unsigned n = 0; while (s[n]) n++; return n; }
 static void etime_text(uint8_t v, char *t)
 {
     static const char *const DIV[5] = {"1/8", "3/16", "1/4", "3/8", "1/2"};
@@ -354,6 +374,7 @@ void app_init(void)
 {
     jungle_init();
     music_init();
+    music_clock(plat_ticks24);               /* the meter's clock (Amenity+ OPT) */
     for (unsigned t = 0; t < TRACKS; t++)
         for (unsigned k = 0; k < 3u; k++)
             music_param(t, k, fac.param[t][k]);
@@ -1385,16 +1406,38 @@ static void draw(void)
     } else {
         int32_t x = st.page == PAGE_FACILITY ? cv_text(6, 2, &FONT_M, "FACILITY", C_RED)   /* Facility's page */
                                              : cv_text(6, 2, &FONT_M, APP_NAME, C_CYAN);
-        if (st.external)
+        if (st.external && !(ui.btn >> B_EDIT & 1u))   /* (EDIT held: the meter's place) */
             cv_text(x + 6, 4, &FONT_XS, "EXT", C_GREEN);
-        if (FM1B_BLE)
+        if (FM1B_BLE && !(ui.btn >> B_EDIT & 1u))
             cv_text(x + 6, 17, &FONT_XS, "BLE", plat_ble_connected() ? C_HI : C_DIM);
         if (ui.btn >> B_EDIT & 1u) {         /* EDIT held: how busy the audio is */
             t[0] = 0;
             text_cat(t, "CPU ");
             int_text((int32_t)plat_cpu_pct(), t + 4);
             text_cat(t, "%");
-            cv_text(234 - text_w(&FONT_M, t), 4, &FONT_M, t, C_ORANGE);
+            int32_t xc = 234 - text_w(&FONT_M, t);
+            cv_text(xc, 4, &FONT_M, t, C_ORANGE);
+            {   /* Amenity+ OPT: the parts (% of the block: the break, the tracks, the effects) and the FM6 voices
+                 * (sounding / allowed, and how many the governor let go since power-on) */
+                static const char *const NAME[3] = { "B", " T", " F" };
+                char u[40];
+                struct music_meter m;
+                u[0] = 0;
+                for (int k = 0; k < 3; k++) {
+                    text_cat(u, NAME[k]);
+                    int_text((int32_t)((meter_q[k] * 100u + 2048u) >> 12), u + text_len(u));
+                }
+                cv_text(xc - 6 - text_w(&FONT_XS, u), 4, &FONT_XS, u, C_GRAY);
+                music_meter_peek(&m);
+                u[0] = 0;
+                text_cat(u, "FM ");
+                int_text(m.fm_live, u + text_len(u));
+                text_cat(u, "/");
+                int_text(m.fm_cap, u + text_len(u));
+                text_cat(u, " -");
+                int_text((int32_t)m.shed, u + text_len(u));
+                cv_text(xc - 6 - text_w(&FONT_XS, u), 17, &FONT_XS, u, m.shed ? C_ORANGE : C_GRAY);
+            }
         } else {
             tenths_text(st.tempo, t);
             cv_text(234 - text_w(&FONT_L, t), 1, &FONT_L, t, jungle_tempo_pending() ? C_ORANGE : C_WHITE);
@@ -1595,6 +1638,7 @@ void app_frame(void)
         instant = (int)jungle_instant_active();
     input();
     slots_frame();
+    music_cpu_hint(plat_cpu_pct());          /* the governor: a voice back only when there is room (Amenity+ OPT) */
     if (xruns != last_xruns) {               /* the render ran late: say so, as v1 did */
         if (last_xruns)
             app_say("AUDIO", "OVERLOAD");

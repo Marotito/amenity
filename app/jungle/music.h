@@ -77,6 +77,14 @@ void music_fx(unsigned what, unsigned v);
 void music_send(unsigned track, unsigned what, unsigned v);                          /* the break's snare slices (its one-shots'): the melody avoids them */
 void music_root(unsigned pc);       /* the key: the feedback's root (FX + key), from the next progression */
 void music_stress(int on);          /* CPU test: every voice held, every track heard */
+/* OPT: the governor and the meter */
+void music_overload(void);          /* the audio interrupt: a block took over 90 % of its time (APP_OVERLOAD) */
+void music_cpu_hint(unsigned pct);  /* the load now (plat_cpu_pct): a voice comes back only under 75 % */
+void music_clock(uint32_t (*fn)(void));   /* the clock the meter reads (plat_ticks24) */
+struct music_meter { uint32_t vox, fx, shed; uint8_t fm_live, fm_cap; };
+void music_meter_peek(struct music_meter *m);   /* the voices alone, the sums left (the screen) */
+void music_meter(struct music_meter *m);  /* the tracks' and the mix's clock ticks since the last call; the FM6 voices
+                                           * sounding, allowed; the voices the governor let go since power-on */
 /* the slots (F3): the generator's seed from the next 4-bar block (with the form: a new song from it), the seed of
  * what plays (the song's, or the block's without the form), the 16ths to the next block and the blocks so far */
 void music_seed(uint32_t seed);

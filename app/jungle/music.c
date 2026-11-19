@@ -69,9 +69,10 @@ static float g_of(float hz)   /* tan(pi f / SR), a polynomial: no libm per sampl
     float x = 3.14159265f * hz * (1.0f / SR), x2 = x * x;
     return x * (1.0f + x2 * (0.33333f + x2 * 0.13333f));
 }
-static float soft(float x) { return x / (1.0f + fm_fabsf(x)); }
+#define MUS_AI static inline __attribute__((always_inline))   /* OPT: a helper the RAM code uses: no copy in the flash */
+MUS_AI float soft(float x) { return x / (1.0f + fm_fabsf(x)); }
 static float sine_tab[1024];
-static float sine(float ph) { return sine_tab[(int)(ph * 1024.0f) & 1023]; }
+MUS_AI float sine(float ph) { return sine_tab[(int)(ph * 1024.0f) & 1023]; }
 static float ms_coef(float ms) { return 1.0f - fm_expf(-1.0f / (ms * 0.001f * SR)); }
 static float fbright_v = 1.0f;
 #define fbright fbright_v
@@ -668,7 +669,7 @@ const char *music_harm_sound_name(unsigned snd)
 }
 #define T_PLUCKED(t) ((t) == T_CLAVI || (t) == T_HARPSI || (t) == T_GUITAR)
 struct fm6v;   /* F6d: a voice's FM6 note (below) */
-struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc, kind, midi; struct svf f; struct ks str; struct fm6v *fm; };
+struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc, kind, midi, kill; struct svf f; struct ks str; struct fm6v *fm; };   /* kill: OPT's governor fades it out */
 struct layer {
     struct voice v[3]; int voicing[3], lo, hi;
     int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0, dec0, rel0;
@@ -737,16 +738,31 @@ static void layer_release(struct layer *L)
 {
     for (int v = 0; v < 3; ++v) if (L->v[v].stage && L->v[v].stage != 3) L->v[v].stage = 3;
 }
+/* OPT: the governor. The FM-1 says a block took over 90 % of its time (APP_OVERLOAD: music_overload): the harmony's
+ * FM6 voices give way, the pad's first (a release before a held note, the quietest first), then the rhythm layer's;
+ * never the bass or the melody. A voice let go fades in ~8 ms (no click), and the FM6 voices allowed (fm_cap) come down
+ * to what was left: a new chord's voice past that does not sound. After 4 s with no overload and the load under 75 %,
+ * one more voice is allowed, up to all eight */
+static volatile int ov_flag;
+static int fm_cap = 8, ov_hold, cpu_hint;
+static float ov_calm;
+static unsigned ov_shed;
+static int fm_live(void);
 static void voice_strike(struct layer *L, struct voice *h, int kind)   /* F6b: a voice sounds as it was struck (a sound changed: no old line) */
 {
     h->kind = kind;
+    h->kill = 0;
     float hz = h->freq, v = h->vel;
     switch (kind) {   /* the pluck: brightness, loss, how long it rings, where */
     case T_CLAVI:  ks_pluck(&h->str, hz, 0.75f, 0.15f, 0.9f, v, 0.12f); break;    /* bright, near the pickup: nasal */
     case T_HARPSI: ks_pluck(&h->str, hz, 0.9f, 0.08f, 2.2f, v, 0.07f); break;     /* brighter still, the quill */
     case T_GUITAR: ks_pluck(&h->str, hz, 0.45f, 0.3f, 0.35f, v, 0.2f); break;     /* the palm on it: short */
     case T_EPIANO: case T_BRASS: h->ph[0] = h->ph[1] = h->ph[2] = 0.0f; break;
-    case T_FM6: if (h->fm && L->patch) fm6_strike(h->fm, L->patch, h->midi, v); else h->kind = T_STAB; break;
+    case T_FM6:
+        if (!h->fm || !L->patch) { h->kind = T_STAB; break; }
+        if (h->stage && fm_live() > fm_cap) { h->stage = 0; break; }   /* OPT: past the governor's voices: not this one */
+        fm6_strike(h->fm, L->patch, h->midi, v);
+        break;
     default: break;
     }
 }
@@ -760,7 +776,8 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
         struct voice *h = &L->v[v];
         if (!h->stage) continue;
         if (h->wait > 0.0f) { h->wait -= 1.0f; continue; }   /* a strummed voice not yet struck */
-        if (h->stage == 1) { h->env += (1.05f - h->env) * L->ca; if (h->env >= 1.0f) { h->env = 1.0f; h->stage = 2; } }
+        if (h->kill) { h->env *= 0.98f; if (h->env < 1e-4f) { h->stage = 0; h->kill = 0; continue; } }   /* OPT: the governor's */
+        else if (h->stage == 1) { h->env += (1.05f - h->env) * L->ca; if (h->env >= 1.0f) { h->env = 1.0f; h->stage = 2; } }
         else if (h->stage == 2) h->env += (L->sus - h->env) * L->cd;
         else { h->env -= h->env * L->cr; if (h->env < 1e-4f) { h->stage = 0; continue; } }
         float inc = h->freq * (1.0f / SR) * DRIFT(2 + v), s;
@@ -2031,6 +2048,7 @@ void music_init(void)
     layer_shape(&pad, T_FM6, 180, 400, 1.0f, 600, 900, 0, 0.7f, 0.32f);   /* F6d-2: FM6 (the layer's envelope: a fade) */
     pad.patch = pad_patch; rhy.patch = rhy_patch;
     for (int v = 0; v < 3; ++v) pad.v[v].fm = &fm6_pad[v];
+    fm6_core_init();   /* OPT: the sine its renderer reads, in RAM */
     bass.fmb = lead.fmb = -1;
     seeds_in_four();
     rhy.pan0 = 0.4f;
@@ -2114,7 +2132,7 @@ static struct {
     int idle;                                                     /* samples since the echo or the reverb last had sound */
 } fx;
 /* the echo, one half-rate sample: in -> out (its wet) */
-static float echo_tick(float in, float fb, float lp_k, float wobble)
+MUS_AI float echo_tick(float in, float fb, float lp_k, float wobble)
 {
     fx.e_time += (fx.e_target - fx.e_time) * 0.0006f;          /* the time glides (a tape sped up or slowed: the pitch bends) */
     float d = fx.e_time * (1.0f + wobble);
@@ -2131,7 +2149,7 @@ static float echo_tick(float in, float fb, float lp_k, float wobble)
     ++fx.e_w;
     return y;
 }
-static void room_tick(float in, float g, float damp, float *l, float *r)
+MUS_AI void room_tick(float in, float g, float damp, float *l, float *r)
 {
     float a = 0.0f, *c = rv_comb;
     in *= 0.18f;
@@ -2158,7 +2176,7 @@ static void room_tick(float in, float g, float damp, float *l, float *r)
     }
     *l = out[0]; *r = out[1];
 }
-static void spring_tick(float in, float g, float *l, float *r)
+MUS_AI void spring_tick(float in, float g, float *l, float *r)
 {
     const uint32_t L = 990u;                                    /* the loop: 45 ms */
     float x = in * 0.25f + fx.sp_lp * g;
@@ -2179,7 +2197,7 @@ static void spring_tick(float in, float g, float *l, float *r)
     *l = 2.0f * sp_line[(fx.sp_w - L / 2u) & (SP_N - 1u)];
     *r = 2.0f * sp_line[(fx.sp_w - (3u * L) / 4u) & (SP_N - 1u)];
 }
-static void chorus_tick(float in, float *l, float *r)
+MUS_AI void chorus_tick(float in, float *l, float *r)
 {
     ch_buf[fx.ch_w & (CH_N - 1u)] = in;
     fx.ch_ph += 0.45f / SR;
@@ -2243,9 +2261,126 @@ void music_view(struct music_view *v)
 enum { CHUNK = 256 };
 static float buf_bass[CHUNK], buf_harm[2 * CHUNK], buf_mel[CHUNK];
 static float gain[TRACKS] = { 1.0f, 0.0f, 0.0f, 0.0f };
+/* OPT: the mix (the tracks' gains, the sends, the chorus, the echo, the reverb, the sum's knee), each sample, from RAM
+ * (plat.h PLAT_RAM_CODE: out of the flash cache's way); this chunk's settings in p. The same arithmetic as in F6a */
+struct mixp { float tgt[TRACKS], se[TRACKS], sr[TRACKS], ch[TRACKS], pl[TRACKS], pr[TRACKS], efb, e_lpk, wob, rg, ret; int spring, ch_on; };
+static unsigned mix_par;
+static PLAT_RAM_CODE __attribute__((noinline)) void mix_chunk(int32_t *lr, unsigned n, const struct mixp *p)
+{
+    unsigned par = mix_par;
+    /* the mix: each track's gain glides to its target in ~5 ms (no click); the break's own gain on what jungle.c made */
+    const float glide = 1.0f / 220.0f, thr_dec = 1.0f - 1.0f / (0.18f * SR);
+    for (unsigned i = 0; i < n; ++i) {
+        for (int t = 0; t < TRACKS; ++t) {
+            float d = p->tgt[t] - gain[t];
+            gain[t] = d > glide ? gain[t] + glide : d < -glide ? gain[t] - glide : p->tgt[t];
+        }
+        int32_t a = lr[2 * i], c = lr[2 * i + 1];
+        if (gain[TRK_BREAK] != 1.0f) { a = (int32_t)((float)a * gain[TRK_BREAK]); c = (int32_t)((float)c * gain[TRK_BREAK]); }
+        float bv = buf_bass[i] * gain[TRK_BASS], mv = buf_mel[i] * gain[TRK_MELODY];
+        float hl = buf_harm[2 * i] * gain[TRK_HARMONY], hr = buf_harm[2 * i + 1] * gain[TRK_HARMONY], hm = 0.5f * (hl + hr);
+        float dl = bv * p->pl[TRK_BASS] + mv * p->pl[TRK_MELODY] + hl * p->pl[TRK_HARMONY];
+        float dr = bv * p->pr[TRK_BASS] + mv * p->pr[TRK_MELODY] + hr * p->pr[TRK_HARMONY];
+        /* the sends */
+        float sb = p->se[TRK_BREAK] > fx.throw_env ? p->se[TRK_BREAK] : fx.throw_env, bm = 0.0f;
+        if (sb > 0.0f || p->sr[TRK_BREAK] > 0.0f) bm = (float)(a + c) * (0.5f / 8388607.0f);
+        fx.throw_env *= thr_dec;
+        if (fx.throw_env < 1e-3f) fx.throw_env = 0.0f;
+        float es = bv * p->se[TRK_BASS] + mv * p->se[TRK_MELODY] + hm * p->se[TRK_HARMONY] + bm * sb;
+        float rs = bv * p->sr[TRK_BASS] + mv * p->sr[TRK_MELODY] + hm * p->sr[TRK_HARMONY] + bm * p->sr[TRK_BREAK];
+        if (p->ch_on) {   /* the chorus: its wet beside the dry (the width) */
+            float cl, cr;
+            chorus_tick(bv * p->ch[TRK_BASS] + mv * p->ch[TRK_MELODY] + hm * p->ch[TRK_HARMONY], &cl, &cr);
+            dl += 0.8f * cl; dr += 0.8f * cr;
+        }
+        /* the echo and the reverb, at half the rate (every other sample, the pair's mean in), unless all is silent */
+        fx.in_e += es; fx.in_r += rs;
+        if (es != 0.0f || rs != 0.0f) fx.idle = 0;
+        if (par++ & 1u) {
+            if (fx.idle < (int)(0.6f * SR) || p->efb >= 1.0f) {
+                float eo = echo_tick(0.5f * fx.in_e, p->efb, p->e_lpk, p->wob), l, r;
+                if (p->spring) spring_tick(0.5f * (fx.in_r + 0.5f * eo), p->rg, &l, &r);
+                else room_tick(0.5f * (fx.in_r + 0.5f * eo), p->rg, 0.3f, &l, &r);
+                fx.e_out0 = fx.e_out1; fx.e_out1 = eo;
+                fx.r_l0 = fx.r_l1; fx.r_l1 = l; fx.r_r0 = fx.r_r1; fx.r_r1 = r;
+                if (fm_fabsf(eo) + fm_fabsf(l) > 1e-4f) fx.idle = 0;
+            } else fx.e_out0 = fx.e_out1 = fx.r_l0 = fx.r_l1 = fx.r_r0 = fx.r_r1 = 0.0f;
+            fx.in_e = fx.in_r = 0.0f;
+            dl += p->ret * (0.5f * (fx.e_out0 + fx.e_out1) + 0.5f * (fx.r_l0 + fx.r_l1));
+            dr += p->ret * (0.5f * (fx.e_out0 + fx.e_out1) + 0.5f * (fx.r_r0 + fx.r_r1));
+        } else {
+            dl += p->ret * (fx.e_out1 + fx.r_l1);
+            dr += p->ret * (fx.e_out1 + fx.r_r1);
+        }
+        if (fx.idle < 0x7fffffff) ++fx.idle;
+        if (dl != 0.0f || dr != 0.0f) {   /* the tracks, softly; then, past -1 dB, the sum bends (only with the tracks in it:
+                                           * Amenity alone stays bit for bit) */
+            float L = 0.75f * soft(1.2f * dl), R = 0.75f * soft(1.2f * dr);
+            float tl = (float)a * (1.0f / 8388607.0f) + L, tr = (float)c * (1.0f / 8388607.0f) + R;
+            float al = fm_fabsf(tl), ar = fm_fabsf(tr);
+            if (al > 0.89f) { float y = 0.89f + 0.11f * soft((al - 0.89f) * (1.0f / 0.11f)); tl = tl < 0.0f ? -y : y; }
+            if (ar > 0.89f) { float y = 0.89f + 0.11f * soft((ar - 0.89f) * (1.0f / 0.11f)); tr = tr < 0.0f ? -y : y; }
+            a = (int32_t)(tl * 8388607.0f);
+            c = (int32_t)(tr * 8388607.0f);
+        }
+        lr[2 * i] = a > 8388607 ? 8388607 : a < -8388607 ? -8388607 : a;          /* 24 bits: never wrap */
+        lr[2 * i + 1] = c > 8388607 ? 8388607 : c < -8388607 ? -8388607 : c;
+    }
+    mix_par = par;
+}
+static int fm_live(void)
+{
+    int n = 0;
+    for (int v = 0; v < 3; ++v) {
+        n += pad.v[v].stage && pad.v[v].kind == T_FM6 && !pad.v[v].kill;
+        n += rhy.v[v].stage && rhy.v[v].kind == T_FM6 && !rhy.v[v].kill;
+    }
+    return n + (bass.on && bass.fmb >= 0) + (lead.on && lead.fmb >= 0);
+}
+void music_overload(void) { ov_flag = 1; }
+void music_cpu_hint(unsigned pct) { cpu_hint = (int)pct; }
+static void governor(unsigned n)
+{
+    if (ov_hold > 0) ov_hold -= (int)n;
+    if (ov_flag && ov_hold <= 0) {
+        struct voice *best = 0;
+        float best_score = 1e9f;
+        for (int l = 0; l < 2; ++l) {
+            struct layer *L = l ? &rhy : &pad;
+            for (int v = 0; v < 3; ++v) {
+                struct voice *h = &L->v[v];
+                if (!h->stage || h->kind != T_FM6 || h->kill) continue;
+                float score = (float)l * 100.0f + (h->stage == 3 ? 0.0f : 10.0f) + h->env;
+                if (score < best_score) { best_score = score; best = h; }
+            }
+        }
+        if (best) { best->kill = 1; ++ov_shed; }
+        int live = fm_live();
+        fm_cap = live < 2 ? 2 : live;
+        ov_calm = 0.0f;
+        ov_hold = (int)(0.02f * SR);   /* the fade's time and a little: then look again */
+    } else if (fm_cap < 8 && (ov_calm += (float)n) > 4.0f * SR && cpu_hint < 75) {
+        ++fm_cap;
+        ov_calm = 0.0f;
+    }
+    ov_flag = 0;
+}
+/* OPT: the meter (EDIT held): the time of the tracks (their events and voices) and of the mix (the effects), on the
+ * app's clock (music_clock: plat_ticks24); music_meter hands the sums over and starts them again */
+static uint32_t (*mclock)(void);
+static uint32_t m_vox, m_fx;
+void music_clock(uint32_t (*fn)(void)) { mclock = fn; }
+void music_meter(struct music_meter *m)
+{
+    m->vox = m_vox; m->fx = m_fx; m_vox = m_fx = 0;
+    m->fm_live = (uint8_t)fm_live(); m->fm_cap = (uint8_t)fm_cap; m->shed = ov_shed;
+}
+void music_meter_peek(struct music_meter *m) { m->vox = m->fx = 0; m->fm_live = (uint8_t)fm_live(); m->fm_cap = (uint8_t)fm_cap; m->shed = ov_shed; }
 static void render_chunk(int32_t *lr, unsigned n)
 {
     unsigned e = 0;
+    uint32_t t0 = mclock ? mclock() : 0u;
+    governor(n);
     drift_chunk(n);
     float tgt[TRACKS];
     for (int t = 0; t < TRACKS; ++t) {
@@ -2279,8 +2414,11 @@ static void render_chunk(int32_t *lr, unsigned n)
     if (lfo_ph >= 1.0f) lfo_ph -= 1.0f;
     float tri = lfo_ph < 0.5f ? 2.0f * lfo_ph : 2.0f - 2.0f * lfo_ph;
     float g_pad = g_of(900.0f * h_bright * fbright * (0.45f + 2.6f * h_move * tri * tri));
-    /* the tracks, each in its own buffer (the events at their frames) */
-    for (unsigned i = 0; i < n; ++i) {
+    /* the tracks, each in its own buffer (the events at their frames). OPT: a stretch between two events, track by
+     * track (the bass's whole stretch, then the melody's, then the harmony's), not the four in turn each sample: the
+     * flash's cache keeps one track's code at a time. The same sound to the bit: a track's samples depend only on
+     * itself and the events, and the events still come at their samples (a stretch ends before the next could) */
+    for (unsigned i = 0; i < n;) {
         while (e < nev && ev[e].frame <= i) {
             if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + i); else on_hit(ev[e].a, ev[e].b);
             ++e;
@@ -2290,16 +2428,41 @@ static void render_chunk(int32_t *lr, unsigned n)
             for (int q = 0; q < 3; ++q)
                 if (tq[t][q].v >= 0 && (tq[t][q].wait -= 1.0f) <= 0.0f) { int v = tq[t][q].v; tq[t][q].v = -1; --tq_n; vstep_go(t, v); }
         pend_tick();
-        float l = 0.0f, r = 0.0f;
-        buf_bass[i] = bass_render() * 0.55f;
-        buf_mel[i] = lead_render() * 0.32f;
-        layer_render(&pad, &l, &r, g_pad);
-        layer_render(&rhy, &l, &r, g_pad);
-        buf_harm[2 * i] = l;
-        buf_harm[2 * i + 1] = r;
+        /* the stretch: up to the next event's frame, or the first sample a wait could end on (a wait w, counted down
+         * one a sample from the next, ends w or more samples on: floor(w) is safe) */
+        unsigned j = e < nev && ev[e].frame < n ? ev[e].frame : n;
+#define OPT_UPTO(w) do { float w_ = (w); unsigned k_ = w_ < 1.0f ? 1u : w_ > 4096.0f ? 4096u : (unsigned)w_; \
+                         if (i + k_ < j) j = i + k_; } while (0)
+        if (mpend.v >= 0) OPT_UPTO(mpend.wait);
+        if (tq_n) for (int t = TRK_BASS; t <= TRK_MELODY; ++t)
+            for (int q = 0; q < 3; ++q) if (tq[t][q].v >= 0) OPT_UPTO(tq[t][q].wait);
+        if (pend_n) for (int q = 0; q < 8; ++q) if (pend[q].live) OPT_UPTO(pend[q].wait);
+#undef OPT_UPTO
+        if (j <= i) j = i + 1u;
+        {   /* the waits, counted down for the stretch's other samples (exact: a float less a whole number below 2^24) */
+            float m = (float)(j - i - 1u);
+            if (m > 0.0f) {
+                if (mpend.v >= 0) mpend.wait -= m;
+                if (tq_n) for (int t = TRK_BASS; t <= TRK_MELODY; ++t)
+                    for (int q = 0; q < 3; ++q) if (tq[t][q].v >= 0) tq[t][q].wait -= m;
+                if (pend_n) for (int q = 0; q < 8; ++q) if (pend[q].live) pend[q].wait -= m;
+            }
+        }
+        for (unsigned k = i; k < j; ++k) buf_bass[k] = bass_render() * 0.55f;
+        for (unsigned k = i; k < j; ++k) buf_mel[k] = lead_render() * 0.32f;
+        for (unsigned k = i; k < j; ++k) {
+            float l = 0.0f, r = 0.0f;
+            layer_render(&pad, &l, &r, g_pad);
+            layer_render(&rhy, &l, &r, g_pad);
+            buf_harm[2 * k] = l;
+            buf_harm[2 * k + 1] = r;
+        }
+        i = j;
     }
     for (; e < nev; ++e) if (ev[e].type == EV_STEP) on_step(ev[e].a, frame_base + n);
     nev = 0;
+    uint32_t t1 = mclock ? mclock() : 0u;
+    m_vox += t1 - t0;
     frame_base += n;
     /* the effects' settings, this chunk (F6a): the BASE's style for the busses, each track's for its sends */
     const int bs = base_style;
@@ -2330,66 +2493,13 @@ static void render_chunk(int32_t *lr, unsigned n)
     static float wow_ph;
     wow_ph += (float)n * (0.55f / SR);
     if (wow_ph >= 1.0f) wow_ph -= 1.0f;
-    float wob = 0.0012f * sine(wow_ph);
-    static unsigned par;
-    /* the mix: each track's gain glides to its target in ~5 ms (no click); the break's own gain on what jungle.c made */
-    const float glide = 1.0f / 220.0f, thr_dec = 1.0f - 1.0f / (0.18f * SR);
-    for (unsigned i = 0; i < n; ++i) {
-        for (int t = 0; t < TRACKS; ++t) {
-            float d = tgt[t] - gain[t];
-            gain[t] = d > glide ? gain[t] + glide : d < -glide ? gain[t] - glide : tgt[t];
-        }
-        int32_t a = lr[2 * i], c = lr[2 * i + 1];
-        if (gain[TRK_BREAK] != 1.0f) { a = (int32_t)((float)a * gain[TRK_BREAK]); c = (int32_t)((float)c * gain[TRK_BREAK]); }
-        float bv = buf_bass[i] * gain[TRK_BASS], mv = buf_mel[i] * gain[TRK_MELODY];
-        float hl = buf_harm[2 * i] * gain[TRK_HARMONY], hr = buf_harm[2 * i + 1] * gain[TRK_HARMONY], hm = 0.5f * (hl + hr);
-        float dl = bv * pl[TRK_BASS] + mv * pl[TRK_MELODY] + hl * pl[TRK_HARMONY];
-        float dr = bv * pr[TRK_BASS] + mv * pr[TRK_MELODY] + hr * pr[TRK_HARMONY];
-        /* the sends */
-        float sb = se[TRK_BREAK] > fx.throw_env ? se[TRK_BREAK] : fx.throw_env, bm = 0.0f;
-        if (sb > 0.0f || sr_[TRK_BREAK] > 0.0f) bm = (float)(a + c) * (0.5f / 8388607.0f);
-        fx.throw_env *= thr_dec;
-        if (fx.throw_env < 1e-3f) fx.throw_env = 0.0f;
-        float es = bv * se[TRK_BASS] + mv * se[TRK_MELODY] + hm * se[TRK_HARMONY] + bm * sb;
-        float rs = bv * sr_[TRK_BASS] + mv * sr_[TRK_MELODY] + hm * sr_[TRK_HARMONY] + bm * sr_[TRK_BREAK];
-        if (ch_on) {   /* the chorus: its wet beside the dry (the width) */
-            float cl, cr;
-            chorus_tick(bv * ch[TRK_BASS] + mv * ch[TRK_MELODY] + hm * ch[TRK_HARMONY], &cl, &cr);
-            dl += 0.8f * cl; dr += 0.8f * cr;
-        }
-        /* the echo and the reverb, at half the rate (every other sample, the pair's mean in), unless all is silent */
-        fx.in_e += es; fx.in_r += rs;
-        if (es != 0.0f || rs != 0.0f) fx.idle = 0;
-        if (par++ & 1u) {
-            if (fx.idle < (int)(0.6f * SR) || efb >= 1.0f) {
-                float eo = echo_tick(0.5f * fx.in_e, efb, e_lpk, wob), l, r;
-                if (spring) spring_tick(0.5f * (fx.in_r + 0.5f * eo), rg, &l, &r);
-                else room_tick(0.5f * (fx.in_r + 0.5f * eo), rg, 0.3f, &l, &r);
-                fx.e_out0 = fx.e_out1; fx.e_out1 = eo;
-                fx.r_l0 = fx.r_l1; fx.r_l1 = l; fx.r_r0 = fx.r_r1; fx.r_r1 = r;
-                if (fm_fabsf(eo) + fm_fabsf(l) > 1e-4f) fx.idle = 0;
-            } else fx.e_out0 = fx.e_out1 = fx.r_l0 = fx.r_l1 = fx.r_r0 = fx.r_r1 = 0.0f;
-            fx.in_e = fx.in_r = 0.0f;
-            dl += ret * (0.5f * (fx.e_out0 + fx.e_out1) + 0.5f * (fx.r_l0 + fx.r_l1));
-            dr += ret * (0.5f * (fx.e_out0 + fx.e_out1) + 0.5f * (fx.r_r0 + fx.r_r1));
-        } else {
-            dl += ret * (fx.e_out1 + fx.r_l1);
-            dr += ret * (fx.e_out1 + fx.r_r1);
-        }
-        if (fx.idle < 0x7fffffff) ++fx.idle;
-        if (dl != 0.0f || dr != 0.0f) {   /* the tracks, softly; then, past -1 dB, the sum bends (only with the tracks in it:
-                                           * Amenity alone stays bit for bit) */
-            float L = 0.75f * soft(1.2f * dl), R = 0.75f * soft(1.2f * dr);
-            float tl = (float)a * (1.0f / 8388607.0f) + L, tr = (float)c * (1.0f / 8388607.0f) + R;
-            float al = fm_fabsf(tl), ar = fm_fabsf(tr);
-            if (al > 0.89f) { float y = 0.89f + 0.11f * soft((al - 0.89f) * (1.0f / 0.11f)); tl = tl < 0.0f ? -y : y; }
-            if (ar > 0.89f) { float y = 0.89f + 0.11f * soft((ar - 0.89f) * (1.0f / 0.11f)); tr = tr < 0.0f ? -y : y; }
-            a = (int32_t)(tl * 8388607.0f);
-            c = (int32_t)(tr * 8388607.0f);
-        }
-        lr[2 * i] = a > 8388607 ? 8388607 : a < -8388607 ? -8388607 : a;          /* 24 bits: never wrap */
-        lr[2 * i + 1] = c > 8388607 ? 8388607 : c < -8388607 ? -8388607 : c;
+    struct mixp mp = { .efb = efb, .e_lpk = e_lpk, .wob = 0.0012f * sine(wow_ph), .rg = rg, .ret = ret,
+                       .spring = spring, .ch_on = ch_on };
+    for (int t = 0; t < TRACKS; ++t) {
+        mp.tgt[t] = tgt[t]; mp.se[t] = se[t]; mp.sr[t] = sr_[t]; mp.ch[t] = ch[t]; mp.pl[t] = pl[t]; mp.pr[t] = pr[t];
     }
+    PLAT_FAR(mix_chunk)(lr, n, &mp);
+    if (mclock) m_fx += mclock() - t1;
 }
 void music_render(int32_t *lr, unsigned n)
 {
