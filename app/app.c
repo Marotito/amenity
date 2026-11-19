@@ -104,12 +104,12 @@ static struct {
 enum { FOC_BASE, FOCUSES = TRACKS + 1 };
 static const char *const TRACK_NAME[TRACKS] = {"BREAK", "BASS", "HARMONY", "MELODY"};
 static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID", "WALK", "1 DROP", "RIFF"};
-static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE"};
+static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE", "UPRIGHT", "FM BASS", "DUB"};
 static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "STABS", "PAD", "MIX+PAD"};
-static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW"};
+static const char *const HARM_SOUND[MHSOUNDS] = {"ORGAN", "SAW", "EPIANO", "CLAVI", "HARPSI", "GUITAR", "BRASS"};
 static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB"};
 static const char *const MEL_MODE[MMEL_MODES] = {"SEED", "RIFF", "LINE", "ANSWER"};
-static const char *const MEL_SOUND[MMSOUNDS] = {"SAW", "SQUARE", "FM BELL", "REED", "STRING"};
+static const char *const MEL_SOUND[MMSOUNDS] = {"SAW", "SQUARE", "FM BELL", "REED", "STRING", "FLUTE", "VIBES", "PLUCK", "BRASS"};
 static struct {
     uint8_t focus, stress;
     uint8_t level[TRACKS];

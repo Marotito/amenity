@@ -110,14 +110,14 @@ static const struct style STYLE[MSTYLES] = {
         { "BAROQUE", 8, { {0,Q_MIN,S_AEO,2,"i"}, {5,Q_MIN,S_DOR,2,"iv"}, {10,Q_DOM,S_MIX,2,"VII"}, {3,Q_MAJ7,S_ION,2,"III"},
                           {8,Q_MAJ7,S_LYD,2,"VI"}, {2,Q_HDIM,S_LOC,2,"ii0"}, {7,Q_DOM,S_PHRDOM,2,"V"}, {0,Q_MIN,S_HARM,2,"i"} } } },
       /* KICK LONG RAGGA ACID WALK 1DROP RIFF */
-      { 15, 40, 30, 15, 0, 0, 0 }, MTIMBRE_REESE, B(MD_A) | B(MD_D) | M_JAZZ, 70, MHSOUND_SAW, 1 },
+      { 15, 40, 30, 15, 0, 0, 0 }, MTIMBRE_REESE, B(MD_A) | B(MD_D) | M_JAZZ, 70, MHSOUND_HARPSI, 1 },
     { "JAZZ", 100.0f, {
         { "DORIAN", 2, { {0,Q_MIN,S_DOR,16,"i7"}, {5,Q_DOM,S_MIX,16,"IV7"} } },
         { "II-V-I", 3, { {2,Q_HDIM,S_LOC,4,"ii0"}, {7,Q_DOM,S_PHRDOM,4,"V7"}, {0,Q_MIN,S_MEL,8,"i7"} } },
         { "DESCENT", 4, { {0,Q_MIN,S_DOR,4,"i7"}, {10,Q_DOM,S_MIX,4,"VII7"}, {8,Q_MAJ7,S_LYD,4,"VImaj"}, {7,Q_DOM,S_PHRDOM,4,"V7"} } },
         { "BLUES 12", 7, { {0,Q_MIN,S_DOR,16,"i7"}, {5,Q_MIN,S_DOR,8,"iv7"}, {0,Q_MIN,S_DOR,8,"i7"}, {8,Q_DOM,S_LYD,4,"VI7"},
                            {7,Q_DOM,S_PHRDOM,4,"V7"}, {0,Q_MIN,S_DOR,4,"i7"}, {7,Q_DOM,S_PHRDOM,4,"V7"} } } },
-      { 0, 20, 0, 0, 80, 0, 0 }, MTIMBRE_SUB, M_JAZZ, 20, MHSOUND_ORGAN, 0 },
+      { 0, 20, 0, 0, 80, 0, 0 }, MTIMBRE_UPRIGHT, M_JAZZ, 20, MHSOUND_EPIANO, 0 },
     { "ACID", 135.0f, {
         { "ONE CHORD", 2, { {0,Q_MIN,S_PHR,12,"i"}, {1,Q_MAJ,S_LYD,4,"bII"} } },
         { "RAVE", 4, { {0,Q_MIN,S_AEO,4,"i"}, {10,Q_MAJ,S_MIX,4,"VII"}, {8,Q_MAJ,S_LYD,4,"VI"}, {10,Q_MAJ,S_MIX,4,"VII"} } },
@@ -130,13 +130,13 @@ static const struct style STYLE[MSTYLES] = {
         { "MIXO", 4, { {0,Q_MAJ,S_MIX,4,"I"}, {10,Q_MAJ,S_ION,4,"bVII"}, {5,Q_MAJ,S_LYD,4,"IV"}, {0,Q_MAJ,S_MIX,4,"I"} } },
         { "BLUES 8", 7, { {0,Q_MIN,S_BLUES,8,"i7"}, {5,Q_MIN,S_DOR,4,"iv7"}, {0,Q_MIN,S_BLUES,4,"i7"}, {7,Q_DOM,S_PHRDOM,4,"V7"},
                           {5,Q_MIN,S_DOR,4,"iv7"}, {0,Q_MIN,S_BLUES,4,"i7"}, {7,Q_DOM,S_PHRDOM,4,"V7"} } } },
-      { 0, 20, 20, 0, 0, 0, 60 }, MTIMBRE_SUB, B(MD_A) | B(MD_B) | B(MD_JCOMP), 40, MHSOUND_ORGAN, 0 },
+      { 0, 20, 20, 0, 0, 0, 60 }, MTIMBRE_SUB, B(MD_A) | B(MD_B) | B(MD_JCOMP), 40, MHSOUND_EPIANO, 0 },
     { "DUB", 85.0f, {
         { "ONE CHORD", 1, { {0,Q_MIN,S_AEO,16,"i"} } },
         { "I-VII", 2, { {0,Q_MIN,S_AEO,8,"i"}, {10,Q_MAJ,S_MIX,8,"VII"} } },
         { "I-IV", 2, { {0,Q_MIN,S_DOR,8,"i"}, {5,Q_MIN,S_DOR,8,"iv"} } },
         { "ROOTS", 4, { {0,Q_MAJ,S_ION,4,"I"}, {5,Q_MAJ,S_LYD,4,"IV"}, {7,Q_DOM,S_MIX,4,"V"}, {5,Q_MAJ,S_LYD,4,"IV"} } } },
-      { 0, 15, 25, 0, 0, 60, 0 }, MTIMBRE_SUB, B(MD_A) | B(MD_B) | B(MD_C), 15, MHSOUND_ORGAN, 0 },
+      { 0, 15, 25, 0, 0, 60, 0 }, MTIMBRE_DUB, B(MD_A) | B(MD_B) | B(MD_C), 15, MHSOUND_GUITAR, 0 },
 };
 const char *music_style_name(unsigned s) { return s < MSTYLES ? STYLE[s].name : "BASE"; }
 const char *music_prog_name(unsigned s, unsigned p) { return s < MSTYLES && p < 4u ? STYLE[s].p[p].name : "AUTO"; }
@@ -382,9 +382,62 @@ static void cycle_start(void)
     pick_next_prog();
 }
 
+/* ------------------------------------------------- a plucked string (F6b) --- */
+/* Karplus-Strong: a line a period long, filled with a burst of noise (darker: a softer pluck), round and round
+ * through a little low-pass (the string's loss: its brightness dying) and an allpass (the fraction of a sample that
+ * tunes it). CLAVI, HARPSI, GUITAR, UPRIGHT, PLUCK: one string, its pluck, its loss, its damper. Its noise its own:
+ * the song's dice stay the song's. */
+static uint32_t nz = 0x1234567u;
+static float nrand(void) { nz = nz * 1664525u + 1013904223u; return (float)(int32_t)nz * (1.0f / 2147483648.0f); }
+struct ks { float *b; uint16_t cap, n, w; float prev, damp, loss, apc, apx, apy; };
+static void ks_pluck(struct ks *k, float hz, float bright, float damp, float t60, float vel, float comb)
+{
+    if (!k->b) return;
+    float period = SR / hz, d = period - damp;              /* the loop: n samples + the low-pass's + the allpass's */
+    int n = (int)d;
+    float fr = d - (float)n;
+    if (fr < 0.15f) { --n; fr += 1.0f; }
+    if (n > (int)k->cap - 1) n = (int)k->cap - 1;
+    if (n < 4) n = 4;
+    k->apc = (1.0f - fr) / (1.0f + fr);
+    float lp = 0.0f, mean = 0.0f;
+    for (int i = 0; i < n; ++i) { lp += (nrand() - lp) * bright; k->b[i] = lp; mean += lp; }
+    mean /= (float)n;
+    int cp = (int)((float)n * comb);                       /* where it is plucked: a comb on the burst (thinner near the bridge) */
+    for (int i = n - 1; i >= 0; --i) k->b[i] = (k->b[i] - mean - (cp > 0 && i >= cp ? k->b[i - cp] - mean : 0.0f)) * vel * 1.4f;
+    k->n = (uint16_t)n; k->w = 0; k->prev = 0.0f; k->apx = k->apy = 0.0f;
+    k->damp = damp;
+    k->loss = fm_expf(-6.9f * period / (t60 * SR));
+}
+static float ks_run(struct ks *k)
+{
+    if (!k->n) return 0.0f;
+    float y = k->b[k->w];
+    float f = (y + (k->prev - y) * k->damp) * k->loss;     /* the loss: a little low-pass, a little less each time */
+    k->prev = y;
+    float a = k->apc * f + k->apx - k->apc * k->apy;       /* the tuning */
+    k->apx = f; k->apy = a;
+    k->b[k->w] = a;
+    if (++k->w >= k->n) k->w = 0;
+    return y;
+}
+static void ks_mute(struct ks *k, float t60) { if (k->n) k->loss = fm_expf(-6.9f * (float)k->n / (t60 * SR)); }   /* the damper */
+static float ks_bass_buf[2048] PLAT_POOL, ks_rhy_buf[3][512] PLAT_POOL, ks_lead_buf[512] PLAT_POOL;
+/* the drift (F6b): an analogue's pitch wandering, a few cents, slow; one per voice, moved once a chunk */
+static float drift[8], drift_to[8];
+static void drift_chunk(unsigned n)
+{
+    static float t;
+    t += (float)n;
+    if (t > 0.4f * SR) { t = 0.0f; for (int i = 0; i < 8; ++i) drift_to[i] = nrand(); }
+    for (int i = 0; i < 8; ++i) drift[i] += (drift_to[i] - drift[i]) * 0.01f;
+}
+#define DRIFT(i) (1.0f + 0.0017f * drift[i])               /* +-3 cents */
+
 /* --------------------------------------------------------------- the bass --- */
 static struct {
-    int mode; float ph[3], freq, target, env, fenv, gate_left, glide, acc, vel; struct svf f; int on, rising, kc;
+    int mode; float ph[3], freq, target, env, fenv, gate_left, glide, acc, vel; struct svf f, f2; int on, rising, kc;
+    struct ks str;
 } bass;
 static void bass_play(int midi, float gate_samples, int slide, int accent, float vel)
 {
@@ -396,6 +449,9 @@ static void bass_play(int midi, float gate_samples, int slide, int accent, float
         return;
     }
     bass.freq = bass.target;
+    if (bass.mode == MTIMBRE_UPRIGHT)   /* the upright: a dark pluck, near the middle; it rings ~1.6 s */
+        ks_pluck(&bass.str, bass.target, 0.18f + 0.12f * vel, 0.45f, 1.6f, 0.9f + 0.3f * (accent ? 1.0f : 0.0f), 0.0f);
+    if (bass.mode == MTIMBRE_FM) bass.ph[1] = 0.0f;
     bass.glide = 0.0015f;
     bass.fenv = 1.0f;
     bass.kc = 0;   /* its filter: now */
@@ -410,32 +466,58 @@ static float bass_render(void)
     if (!bass.on) return 0.0f;
     bass.freq += (bass.target - bass.freq) * bass.glide;
     if (bass.rising) { bass.env += (1.0f - bass.env) * 0.02f; if (bass.env > 0.99f) bass.rising = 0; }
-    float inc = bass.freq * (1.0f / SR), s;
+    float inc = bass.freq * (1.0f / SR), s, sub = 0.0f;
+    int filtered = 1;
     switch (bass.mode) {
     case MTIMBRE_SUB:  s = sine(bass.ph[0]); bass.ph[0] += inc; if (bass.ph[0] >= 1.0f) bass.ph[0] -= 1.0f; break;
-    case MTIMBRE_ACID: s = saw(&bass.ph[0], inc); break;
-    default:
-        s = 0.5f * (saw(&bass.ph[0], inc * 1.004f) + saw(&bass.ph[1], inc * 0.996f)) + 0.6f * sine(bass.ph[2]);
+    case MTIMBRE_ACID: s = fm_tanhf((1.2f + 2.6f * bass.acc * bass.acc) * saw(&bass.ph[0], inc)); break;   /* the 303 into a drive */
+    case MTIMBRE_UPRIGHT: s = 4.6f * ks_run(&bass.str); break;   /* (levels matched by ear-ish RMS, F6b) */
+    case MTIMBRE_FM: {   /* two operators 1:1, the index dying fast (an accent: more) */
+        float idx = (0.25f + 0.9f * bass.fenv * bass.fenv) * (0.6f + 0.4f * bass.acc);
+        float ph = bass.ph[0] + idx * sine(bass.ph[1]);
+        ph -= (float)(int)ph; if (ph < 0.0f) ph += 1.0f;
+        s = 1.2f * sine(ph);
+        bass.ph[0] += inc; if (bass.ph[0] >= 1.0f) bass.ph[0] -= 1.0f;
+        bass.ph[1] += inc; if (bass.ph[1] >= 1.0f) bass.ph[1] -= 1.0f;
+        filtered = 0;
+        break;
+    }
+    case MTIMBRE_DUB:   /* a sine, warmed: round and low */
+        s = 0.8f * fm_tanhf(2.0f * sine(bass.ph[0]));
+        bass.ph[0] += inc; if (bass.ph[0] >= 1.0f) bass.ph[0] -= 1.0f;
+        filtered = 0;
+        break;
+    default:   /* the reese: two saws drifting apart through the filter; its sub under it, clean (F6b) */
+        s = 0.5f * (saw(&bass.ph[0], inc * 1.004f * DRIFT(0)) + saw(&bass.ph[1], inc * 0.996f * DRIFT(1)));
+        sub = 0.6f * sine(bass.ph[2]);
         bass.ph[2] += inc * 0.5f;
         if (bass.ph[2] >= 1.0f) bass.ph[2] -= 1.0f;
         break;
     }
-    if (--bass.kc <= 0) {   /* the filter's coefficients: every 16 samples (F6a: the CPU) */
-        float cut = bass.mode == MTIMBRE_ACID ? 220.0f + 3200.0f * bass.fenv * bass.acc * bass.acc : 140.0f + 700.0f * bass.fenv;
-        svf_set(&bass.f, g_of(cut * bass_cut), (bass.mode == MTIMBRE_ACID ? 0.35f : 1.2f) * bass_k);
-        bass.kc = 16;
+    if (filtered) {
+        if (--bass.kc <= 0) {   /* the filter's coefficients: every 16 samples (F6a: the CPU) */
+            int acid = bass.mode == MTIMBRE_ACID;
+            float cut = acid ? 220.0f + 3200.0f * bass.fenv * bass.acc * bass.acc :
+                        bass.mode == MTIMBRE_UPRIGHT ? 700.0f + 900.0f * bass.fenv : 140.0f + 700.0f * bass.fenv;
+            svf_set(&bass.f, g_of(cut * bass_cut), (acid ? 1.0f : 1.2f) * (acid ? 1.0f : bass_k));
+            if (acid) svf_set(&bass.f2, g_of(cut * bass_cut), 0.35f * bass_k);   /* the acid: 24 dB, two of them */
+            bass.kc = 16;
+        }
+        s = svf_run(&bass.f, s);
+        if (bass.mode == MTIMBRE_ACID) s = 1.3f * svf_run(&bass.f2, s);
     }
-    s = svf_run(&bass.f, s);
+    s += sub;
     bass.fenv *= bass.mode == MTIMBRE_ACID ? 0.9993f : 0.9996f;
     if (bass.gate_left > 0) bass.gate_left -= 1.0f;
-    else bass.env *= bass.mode == MTIMBRE_ACID ? 0.9975f : bass.mode == MTIMBRE_SUB ? 0.9985f : 0.9992f;
+    else bass.env *= bass.mode == MTIMBRE_ACID ? 0.9975f : bass.mode == MTIMBRE_SUB || bass.mode == MTIMBRE_UPRIGHT ? 0.9985f : 0.9992f;
     if (bass.env < 1e-4f) { bass.on = 0; bass.env = 0; }
     return soft(1.6f * s) * bass.env * bass.acc * bass.vel;
 }
 
 /* ------------------------------------------------------- a 3-voice layer --- */
-enum { T_STRINGS, T_ORGAN, T_STAB };
-struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc; struct svf f; };
+enum { T_STRINGS, T_ORGAN, T_STAB, T_EPIANO, T_CLAVI, T_HARPSI, T_GUITAR, T_BRASS };
+#define T_PLUCKED(t) ((t) == T_CLAVI || (t) == T_HARPSI || (t) == T_GUITAR)
+struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc, kind; struct svf f; struct ks str; };
 struct layer {
     struct voice v[3]; int voicing[3], lo, hi;
     int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0, dec0, rel0;
@@ -470,6 +552,7 @@ static void voice_lead(struct layer *L, const int pcs[3])   /* each voice: its c
     }
     L->voicing[0] = best[0]; L->voicing[1] = best[1]; L->voicing[2] = best[2];
 }
+static void voice_strike(struct voice *h, int kind);
 static const int TRIAD[3] = { 0, 1, 2 }, COLOUR[3] = { 1, 2, 3 };
 static void layer_chord(struct layer *L, const struct chord *c, const int idx[3], int octave_up, float vel,
                         int gate_steps, int legato, float strum)   /* strum: samples between voices, up or down */
@@ -487,6 +570,7 @@ static void layer_chord(struct layer *L, const struct chord *c, const int idx[3]
         h->vel = vel;
         h->gate = gate_steps;
         h->wait = 0.0f;
+        if (!legato || !h->kind) voice_strike(h, L->timbre);
         if (strum > 0.0f && !legato) {   /* in pitch order, up or down; each voice a little apart in loudness too */
             int rank = 0;
             for (int o = 0; o < 3; ++o) if (L->voicing[o] < L->voicing[v]) ++rank;
@@ -498,6 +582,18 @@ static void layer_chord(struct layer *L, const struct chord *c, const int idx[3]
 static void layer_release(struct layer *L)
 {
     for (int v = 0; v < 3; ++v) if (L->v[v].stage && L->v[v].stage != 3) L->v[v].stage = 3;
+}
+static void voice_strike(struct voice *h, int kind)   /* F6b: a voice sounds as it was struck (a sound changed: no old line) */
+{
+    h->kind = kind;
+    float hz = h->freq, v = h->vel;
+    switch (kind) {   /* the pluck: brightness, loss, how long it rings, where */
+    case T_CLAVI:  ks_pluck(&h->str, hz, 0.75f, 0.15f, 0.9f, v, 0.12f); break;    /* bright, near the pickup: nasal */
+    case T_HARPSI: ks_pluck(&h->str, hz, 0.9f, 0.08f, 2.2f, v, 0.07f); break;     /* brighter still, the quill */
+    case T_GUITAR: ks_pluck(&h->str, hz, 0.45f, 0.3f, 0.35f, v, 0.2f); break;     /* the palm on it: short */
+    case T_EPIANO: case T_BRASS: h->ph[0] = h->ph[1] = h->ph[2] = 0.0f; break;
+    default: break;
+    }
 }
 static void layer_step_gates(struct layer *L)
 {
@@ -512,21 +608,55 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
         if (h->stage == 1) { h->env += (1.05f - h->env) * L->ca; if (h->env >= 1.0f) { h->env = 1.0f; h->stage = 2; } }
         else if (h->stage == 2) h->env += (L->sus - h->env) * L->cd;
         else { h->env -= h->env * L->cr; if (h->env < 1e-4f) { h->stage = 0; continue; } }
-        float inc = h->freq * (1.0f / SR), s;
-        if (L->timbre == T_ORGAN) {   /* drawbars 8' 4' 2 2/3' 2', a percussion click */
+        float inc = h->freq * (1.0f / SR) * DRIFT(2 + v), s;
+        switch (h->kind) {
+        case T_ORGAN:   /* drawbars 8' 4' 2 2/3' 2', a percussion click */
             s = 0.55f * sine(h->ph[0]) + 0.4f * sine(h->ph[1]) + 0.3f * sine(h->ph[2]) + 0.25f * sine(h->ph[3]);
             h->ph[0] += inc; h->ph[1] += inc * 2.0f; h->ph[2] += inc * 3.0f; h->ph[3] += inc * 4.0f;
             for (int k = 0; k < 4; ++k) if (h->ph[k] >= 1.0f) h->ph[k] -= 1.0f;
             s += 0.35f * h->fenv * h->vel * sine(h->ph[3] * 2.0f);   /* the click: harder on an accent */
             h->fenv *= 0.9985f;
-        } else {
+            break;
+        case T_EPIANO: {   /* a Rhodes: two operators 1:1, the bark dying away; the tine (14:1) a moment */
+            float idx = (0.12f + 0.5f * h->fenv * h->vel) * h_bright;
+            float ph = h->ph[0] + idx * sine(h->ph[1]);
+            ph -= (float)(int)ph; if (ph < 0.0f) ph += 1.0f;
+            float tine = h->fenv * h->fenv; tine *= tine; tine *= tine;
+            s = sine(ph) + 0.18f * tine * h->vel * sine(h->ph[2]);
+            h->ph[0] += inc; if (h->ph[0] >= 1.0f) h->ph[0] -= 1.0f;
+            h->ph[1] += inc; if (h->ph[1] >= 1.0f) h->ph[1] -= 1.0f;
+            h->ph[2] += inc * 14.0f; if (h->ph[2] >= 1.0f) h->ph[2] -= (float)(int)h->ph[2];
+            h->fenv *= 0.99988f;
+            break;
+        }
+        case T_CLAVI: case T_HARPSI: case T_GUITAR:
+            if (h->stage == 3 && h->str.n && h->fenv > 0.0f) { ks_mute(&h->str, h->kind == T_HARPSI ? 0.12f : 0.04f); h->fenv = 0.0f; }
+            s = ks_run(&h->str);
+            if (h->kind == T_CLAVI) {   /* its pickup: the bright string, a bite */
+                if (--h->kc <= 0) { svf_set(&h->f, g_of(3500.0f * h_bright * fbright), 1.4f); h->kc = 16; }
+                s = 1.4f * s - 0.6f * svf_run(&h->f, s);
+            }
+            break;
+        case T_BRASS: {   /* saws through a filter that swells open and falls back (a section's stab) */
             s = 0.5f * (saw(&h->ph[0], inc * 1.0035f) + saw(&h->ph[1], inc * 0.9965f));
             if (--h->kc <= 0) {
-                svf_set(&h->f, L->timbre == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv * h->vel) * h_bright * fbright), L->k);
+                float sw = 0.3f + (1.0f - h->fenv) * h->fenv * 4.0f;   /* the swell, over what stays open */
+                svf_set(&h->f, g_of((L->cut + L->famt * sw * h->vel) * h_bright * fbright), L->k);
+                h->kc = 16;
+            }
+            s = svf_run(&h->f, s);
+            h->fenv *= 0.9996f;
+            break;
+        }
+        default:
+            s = 0.5f * (saw(&h->ph[0], inc * 1.0035f) + saw(&h->ph[1], inc * 0.9965f));
+            if (--h->kc <= 0) {
+                svf_set(&h->f, h->kind == T_STRINGS ? g_moving : g_of((L->cut + L->famt * h->fenv * h->vel) * h_bright * fbright), L->k);
                 h->kc = 16;
             }
             s = svf_run(&h->f, s);
             h->fenv *= 0.9992f;
+            break;
         }
         s *= h->env * L->gain * h->vel;
         float pan = L->pan0 + 0.2f * (float)v;
@@ -695,8 +825,20 @@ set:
         rhythm_set(R_SKANK); rhy.lo = 58; rhy.hi = 74; jz_kind = md - MD_JCOMP;
         layer_shape(&rhy, T_ORGAN, 3, 160, 0.55f, 45, 5000, 0, 1.4f, 0.26f);
     } else rhythm_set(md == MD_C ? R_BUBBLE : R_SKANK);
-    if (harm_sound_now == MHSOUND_SAW && md != MD_STABS) {   /* the same rhythm on detuned saws through a filter */
-        rhy.timbre = T_STAB; rhy.cut = 1100.0f; rhy.famt = 2600.0f; rhy.k = 0.9f; rhy.gain *= 0.8f;
+    {   /* the sound the figure is played on (F6b); dub in AUTO: the guitar chops the skank, the organ bubbles */
+        int snd = harm_sound_now;
+        if (c_hsound == MAUTO && snd == MHSOUND_GUITAR && md == MD_C) snd = MHSOUND_ORGAN;
+        switch (snd) {
+        case MHSOUND_SAW:
+            if (md != MD_STABS) { rhy.timbre = T_STAB; rhy.cut = 1100.0f; rhy.famt = 2600.0f; rhy.k = 0.9f; rhy.gain *= 0.8f; }
+            break;
+        case MHSOUND_EPIANO: layer_shape(&rhy, T_EPIANO, 1, 1100, 0.0f, 140, 0, 0, 1.0f, 0.54f); break;
+        case MHSOUND_CLAVI:  layer_shape(&rhy, T_CLAVI, 1, 3000, 1.0f, 30, 0, 0, 1.0f, 0.48f); break;
+        case MHSOUND_HARPSI: layer_shape(&rhy, T_HARPSI, 1, 3000, 1.0f, 120, 0, 0, 1.0f, 0.8f); break;
+        case MHSOUND_GUITAR: layer_shape(&rhy, T_GUITAR, 1, 3000, 1.0f, 30, 0, 0, 1.0f, 0.92f); break;
+        case MHSOUND_BRASS:  layer_shape(&rhy, T_BRASS, 12, 300, 0.6f, 90, 600, 3000, 0.8f, 0.75f); break;
+        default: break;
+        }
     }
     layer_retime(&rhy, h_decay);
 }
@@ -931,7 +1073,7 @@ void music_mel_seed(unsigned i) { c_mseed = (uint8_t)(i < NSEEDS ? i : MAUTO); }
 /* each style: its seeds (AUTO), its modes' weights (SEED RIFF LINE ANSWER), its sound */
 static const struct { uint8_t n, seeds[5], w[MMEL_MODES], sound; } MSTY[MSTYLES] = {
     { 4, { 0, 1, 2, 3 }, { 60, 0, 40, 0 }, MMSOUND_STRING },          /* breakcore */
-    { 3, { 9, 8, 5 }, { 20, 0, 50, 30 }, MMSOUND_REED },              /* jazz */
+    { 3, { 9, 8, 5 }, { 20, 0, 50, 30 }, MMSOUND_VIBES },             /* jazz */
     { 3, { 3, 1, 8 }, { 20, 80, 0, 0 }, MMSOUND_SQUARE },             /* acid */
     { 4, { 4, 2, 5, 9 }, { 20, 50, 0, 30 }, MMSOUND_SAW },            /* hip hop */
     { 3, { 7, 6, 4 }, { 30, 0, 0, 70 }, MMSOUND_REED },               /* dub */
@@ -940,6 +1082,7 @@ static const struct { uint8_t n, seeds[5], w[MMEL_MODES], sound; } MSTY[MSTYLES]
 /* the lead: one voice, five sounds */
 static struct {
     int on, stage, sound, kc; float ph[2], freq, target, env, fenv, vel, gate_left, vib_ph, age, ca, cd, cr; struct svf f;
+    struct ks str; float scoop, swell;   /* F6b: the plucked line, a reed's or a brass's pitch coming up into the note, the swell */
 } lead;
 static void lead_note(int midi, float gate, float vel)
 {
@@ -951,7 +1094,11 @@ static void lead_note(int midi, float gate, float vel)
         lead.age = 0.0f;
         lead.stage = 1;
         if (lead.sound != MMSOUND_STRING) lead.env = 0.0f;
+        lead.scoop = lead.sound == MMSOUND_BRASS ? 0.017f : lead.sound == MMSOUND_REED ? 0.011f : 0.0f;   /* -30 / -20 cents */
+        lead.swell = 0.0f;
     }
+    if (lead.sound == MMSOUND_PLUCK) ks_pluck(&lead.str, lead.target, 0.5f + 0.3f * vel, 0.3f, 1.2f, vel, 0.15f);
+    if (lead.sound == MMSOUND_VIBES) lead.ph[0] = lead.ph[1] = 0.0f, lead.stage = 1, lead.env = 0.0f;
     lead.fenv = 1.0f;
     lead.kc = 0;
     lead.vel = vel;
@@ -960,19 +1107,26 @@ static void lead_note(int midi, float gate, float vel)
 }
 static float lead_render(void)
 {
-    static const float ATK[MMSOUNDS] = { 3.0f, 2.0f, 1.0f, 20.0f, 150.0f }, REL[MMSOUNDS] = { 80.0f, 40.0f, 400.0f, 90.0f, 250.0f };
-    static const float SUS[MMSOUNDS] = { 0.8f, 0.75f, 0.0f, 0.85f, 0.9f };
+    /*                                 SAW    SQUARE  FM     REED   STRING  FLUTE  VIBES  PLUCK  BRASS */
+    static const float ATK[MMSOUNDS] = { 3.0f, 2.0f, 1.0f, 20.0f, 150.0f, 45.0f, 1.0f, 1.0f, 25.0f };
+    static const float REL[MMSOUNDS] = { 80.0f, 40.0f, 400.0f, 90.0f, 250.0f, 120.0f, 900.0f, 60.0f, 90.0f };
+    static const float SUS[MMSOUNDS] = { 0.8f, 0.75f, 0.0f, 0.85f, 0.9f, 0.8f, 0.0f, 1.0f, 0.8f };
     if (!lead.on) return 0.0f;
     int snd = lead.sound;
     float s;
     int kr = --lead.kc <= 0;   /* the coefficients (filter, envelope): every 16 samples (F6a) */
     if (kr) {
         lead.kc = 16;
-        lead.ca = ms_coef(ATK[snd]); lead.cd = ms_coef(snd == MMSOUND_FM ? 600.0f : 200.0f); lead.cr = ms_coef(REL[snd]);
+        lead.ca = ms_coef(ATK[snd]);
+        lead.cd = ms_coef(snd == MMSOUND_FM ? 600.0f : snd == MMSOUND_VIBES ? 1400.0f : 200.0f);
+        lead.cr = ms_coef(REL[snd]);
         float hz = snd == MMSOUND_SAW ? (700.0f + 3500.0f * lead.fenv * lead.vel) * m_bright :
                    snd == MMSOUND_SQUARE ? (500.0f + 4000.0f * lead.fenv * lead.vel) * m_bright :
-                   snd == MMSOUND_REED ? 1600.0f * m_bright : 2200.0f * m_bright;
-        float k = snd == MMSOUND_SAW ? 0.8f : snd == MMSOUND_SQUARE ? 0.45f : snd == MMSOUND_REED ? 0.5f : 0.9f;
+                   snd == MMSOUND_REED ? 1600.0f * m_bright :
+                   snd == MMSOUND_FLUTE ? 2600.0f * m_bright :                                  /* (its breath) */
+                   snd == MMSOUND_BRASS ? (450.0f + 3600.0f * lead.swell * lead.vel) * m_bright : 2200.0f * m_bright;
+        float k = snd == MMSOUND_SAW ? 0.8f : snd == MMSOUND_SQUARE ? 0.45f : snd == MMSOUND_REED ? 0.5f :
+                  snd == MMSOUND_FLUTE ? 1.6f : 0.9f;
         svf_set(&lead.f, g_of(hz), k);
     }
     if (m_glide > 0.0f) lead.freq += (lead.target - lead.freq) * m_glide; else lead.freq = lead.target;
@@ -981,7 +1135,9 @@ static float lead_render(void)
         float depth = m_vib + (snd == MMSOUND_STRING && lead.age > 0.3f ? 0.25f : 0.0f);
         lead.vib_ph += 5.5f / SR;
         if (lead.vib_ph >= 1.0f) lead.vib_ph -= 1.0f;
-        float inc = lead.freq * (1.0f + depth * 0.0578f * sine(lead.vib_ph)) * (1.0f / SR);
+        float inc = lead.freq * (1.0f + depth * 0.0578f * sine(lead.vib_ph)) * (1.0f / SR) * DRIFT(5) * (1.0f - lead.scoop);
+        lead.scoop *= 0.9985f;                                    /* the scoop: up into the note in ~15 ms */
+        lead.swell += (1.0f - lead.swell) * 0.0012f;               /* the brass's swell: ~20 ms */
         switch (snd) {
         case MMSOUND_SAW:
             s = 0.5f * (saw(&lead.ph[0], inc * 1.003f) + saw(&lead.ph[1], inc * 0.997f));
@@ -989,7 +1145,7 @@ static float lead_render(void)
             break;
         case MMSOUND_SQUARE: case MMSOUND_REED:   /* a pulse: two saws apart (square: half, reed: a quarter) */
             s = saw(&lead.ph[0], inc) - saw(&lead.ph[1], inc);
-            s = snd == MMSOUND_SQUARE ? svf_run(&lead.f, s) : svf_run(&lead.f, s) * 0.8f;
+            s = snd == MMSOUND_SQUARE ? svf_run(&lead.f, s) : svf_run(&lead.f, s + 0.15f * lead.fenv * lead.fenv * nrand()) * 0.8f;
             break;
         case MMSOUND_FM: {   /* two operators: a bell (3.5:1), the index dying away */
             lead.ph[1] += inc * 3.5f; if (lead.ph[1] >= 1.0f) lead.ph[1] -= 1.0f;
@@ -999,13 +1155,35 @@ static float lead_render(void)
             lead.ph[0] += inc; if (lead.ph[0] >= 1.0f) lead.ph[0] -= 1.0f;
             break;
         }
+        case MMSOUND_FLUTE: {   /* a sine and a little of its octave; breath through the filter, more at the start */
+            s = sine(lead.ph[0]) + 0.12f * sine(lead.ph[0] * 2.0f >= 1.0f ? lead.ph[0] * 2.0f - 1.0f : lead.ph[0] * 2.0f);
+            lead.ph[0] += inc; if (lead.ph[0] >= 1.0f) lead.ph[0] -= 1.0f;
+            s += (0.06f + 0.25f * lead.fenv) * svf_run(&lead.f, nrand());
+            break;
+        }
+        case MMSOUND_VIBES: {   /* the bar: 1:4 FM, the index a moment; the motor's tremolo */
+            lead.ph[1] += inc * 4.0f; if (lead.ph[1] >= 1.0f) lead.ph[1] -= 1.0f;
+            float ph = lead.ph[0] + 0.25f * lead.fenv * lead.fenv * lead.vel * sine(lead.ph[1]);
+            ph -= (float)(int)ph; if (ph < 0.0f) ph += 1.0f;
+            s = sine(ph) * (1.0f - 0.25f * (0.5f + 0.5f * sine(lead.vib_ph)));
+            lead.ph[0] += inc; if (lead.ph[0] >= 1.0f) lead.ph[0] -= 1.0f;
+            break;
+        }
+        case MMSOUND_PLUCK:
+            if (lead.stage == 3 && lead.str.n && lead.swell > 0.5f) { ks_mute(&lead.str, 0.08f); lead.swell = 0.0f; }
+            s = 2.5f * ks_run(&lead.str);
+            break;
+        case MMSOUND_BRASS:
+            s = 0.5f * (saw(&lead.ph[0], inc * 1.003f) + saw(&lead.ph[1], inc * 0.997f));
+            s = 2.0f * svf_run(&lead.f, s);
+            break;
         default:   /* the string: a saw, slow, through a filter */
             s = saw(&lead.ph[0], inc);
             s = svf_run(&lead.f, s);
             break;
         }
     }
-    lead.fenv *= snd == MMSOUND_FM ? 0.99985f : 0.9994f;
+    lead.fenv *= snd == MMSOUND_FM || snd == MMSOUND_VIBES ? 0.99985f : 0.9994f;
     if (lead.stage == 1) { lead.env += (1.05f - lead.env) * lead.ca; if (lead.env >= 1.0f) { lead.env = 1.0f; lead.stage = 2; } }
     else if (lead.stage == 2) lead.env += (SUS[snd] - lead.env) * lead.cd;
     else { lead.env -= lead.env * lead.cr; if (lead.env < 1e-4f) { lead.on = 0; lead.env = 0.0f; } }
@@ -1462,6 +1640,9 @@ void music_init(void)
     rhythm_set(R_SKANK);
     bass.mode = MTIMBRE_REESE;
     bass.vel = 1.0f;
+    bass.str.b = ks_bass_buf; bass.str.cap = 2048;   /* the strings' lines (F6b) */
+    for (int v = 0; v < 3; ++v) { rhy.v[v].str.b = ks_rhy_buf[v]; rhy.v[v].str.cap = 512; }
+    lead.str.b = ks_lead_buf; lead.str.cap = 512;
     for (int t = 0; t < TRACKS; ++t) for (int i = 0; i < 3; ++i) tq[t][i].v = -1;
     bass_slide = ms_coef(25.0f);
     next_prog_ix = 0;
@@ -1668,6 +1849,7 @@ static float gain[TRACKS] = { 1.0f, 0.0f, 0.0f, 0.0f };
 static void render_chunk(int32_t *lr, unsigned n)
 {
     unsigned e = 0;
+    drift_chunk(n);
     float tgt[TRACKS];
     for (int t = 0; t < TRACKS; ++t) {
         if (!want_q[t]) heard_muted[t] = want[t];   /* a plain tap: now */
