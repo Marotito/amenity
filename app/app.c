@@ -104,11 +104,9 @@ static struct {
 enum { FOC_BASE, FOCUSES = TRACKS + 1 };
 static const char *const TRACK_NAME[TRACKS] = {"BREAK", "BASS", "HARMONY", "MELODY"};
 static const char *const BASS_MODE[MBASS_MODES] = {"KICK", "LONG", "RAGGA", "ACID", "WALK", "1 DROP", "RIFF"};
-static const char *const BASS_SOUND[MTIMBRES] = {"SUB", "ACID", "REESE", "FINGER", "FM BASS", "DUB"};
 static const char *const HARM_MODE[MHARM_MODES] = {"SKANK", "JAZZ", "MIX", "STABS", "PAD", "MIX+PAD"};
 static const char *const STYLE_ABBR[MSTYLES] = {"BRK", "JAZ", "ACD", "HIP", "DUB"};
 static const char *const MEL_MODE[MMEL_MODES] = {"SEED", "RIFF", "LINE", "ANSWER"};
-static const char *const MEL_SOUND[MMSOUNDS] = {"SAW", "SQUARE", "FM BELL", "REED", "STRING", "FLUTE", "VIBES", "PLUCK", "BRASS"};
 static struct {
     uint8_t focus, stress;
     uint8_t level[TRACKS];
@@ -826,13 +824,13 @@ static void facility_encoders(const int32_t *e, uint32_t now, uint32_t btn)
     } else if (e[EN_PRESET]) {
         if (f == TRK_BASS) {
             music_bass_timbre(fac.bass_sound = auto_turn(fac.bass_sound, e[EN_PRESET], MTIMBRES));
-            app_say("BASS SOUND", fac.bass_sound == MAUTO ? "AUTO" : BASS_SOUND[fac.bass_sound]);
+            app_say("BASS SOUND", fac.bass_sound == MAUTO ? "AUTO" : music_bass_sound_name(fac.bass_sound));
         } else if (f == TRK_HARMONY) {
             music_harm_sound(fac.harm_sound = auto_turn(fac.harm_sound, e[EN_PRESET], MHSOUNDS));
             app_say("HARMONY SOUND", fac.harm_sound == MAUTO ? "AUTO" : music_harm_sound_name(fac.harm_sound));
         } else if (f == TRK_MELODY) {
             music_mel_sound(fac.mel_sound = auto_turn(fac.mel_sound, e[EN_PRESET], MMSOUNDS));
-            app_say("MELODY SOUND", fac.mel_sound == MAUTO ? "AUTO" : MEL_SOUND[fac.mel_sound]);
+            app_say("MELODY SOUND", fac.mel_sound == MAUTO ? "AUTO" : music_mel_sound_name(fac.mel_sound));
         } else if (f == TRK_BREAK && breaks_count()) {
             int n = (int)breaks_count();
             select_break((unsigned)wrap((int)st.brk, e[EN_PRESET] > 0 ? 1 : -1, n));
@@ -1116,7 +1114,7 @@ static void facility_tracks(uint32_t now)
                 text_cat(what, "A:");
             text_cat(what, BASS_MODE[mv.bass_mode]);
             text_cat(what, "/");
-            text_cat(what, BASS_SOUND[mv.bass_sound]);
+            text_cat(what, music_bass_sound_name(mv.bass_sound));
         } else if (t == TRK_HARMONY) {
             if (fac.harm_mode == MAUTO)
                 text_cat(what, "A:");
@@ -1130,7 +1128,7 @@ static void facility_tracks(uint32_t now)
                 text_cat(what, "A:");
             text_cat(what, MEL_MODE[mv.mel_mode % MMEL_MODES]);
             text_cat(what, "/");
-            text_cat(what, MEL_SOUND[mv.mel_sound % MMSOUNDS]);
+            text_cat(what, music_mel_sound_name(mv.mel_sound));
         }
         if (focused)
             cv_rect(0, y, 240, 18, RGB(20, 60, 75));

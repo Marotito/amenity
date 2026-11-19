@@ -24,14 +24,17 @@ void music_render(int32_t *lr, unsigned n);
 enum { TRK_BREAK, TRK_BASS, TRK_HARMONY, TRK_MELODY, TRACKS };
 enum { MSTYLE_BREAKCORE, MSTYLE_JAZZ, MSTYLE_ACID, MSTYLE_HIPHOP, MSTYLE_DUB, MSTYLES };
 enum { MBASS_KICK, MBASS_LONG, MBASS_RAGGA, MBASS_ACID, MBASS_WALK, MBASS_ONEDROP, MBASS_RIFF, MBASS_MODES };
-enum { MTIMBRE_SUB, MTIMBRE_ACID, MTIMBRE_REESE, MTIMBRE_UPRIGHT, MTIMBRE_FM, MTIMBRE_DUB, MTIMBRES };   /* F6b: +3 (UPRIGHT plays FINGER since F6c) */
+enum { MTIMBRE_SUB, MTIMBRE_ACID, MTIMBRE_REESE, MTIMBRE_UPRIGHT, MTIMBRE_FM, MTIMBRE_DUB, MTIMBRE_BANK,
+       MTIMBRES = MTIMBRE_BANK + 16 };   /* F6b: +3 (UPRIGHT plays FINGER since F6c); F6d-2: 16 of the bank (FM: BASS 1) */
+const char *music_bass_sound_name(unsigned sound);
 enum { MHARM_SKANK, MHARM_JAZZ, MHARM_MIX, MHARM_STABS, MHARM_PAD, MHARM_MIX_PAD, MHARM_MODES };
 enum { MHSOUND_ORGAN, MHSOUND_SAW, MHSOUND_EPIANO, MHSOUND_CLAVI, MHSOUND_HARPSI, MHSOUND_GUITAR, MHSOUND_BRASS,
        MHSOUND_BANK, MHSOUNDS = MHSOUND_BANK + 56 };   /* F6d: then 56 voices of the factory DX7 bank (EPIANO: PIANO 1) */
 const char *music_harm_sound_name(unsigned sound);
 enum { MMEL_SEED, MMEL_RIFF, MMEL_LINE, MMEL_ANSWER, MMEL_MODES };                /* the melody's modes */
 enum { MMSOUND_SAW, MMSOUND_SQUARE, MMSOUND_FM, MMSOUND_REED, MMSOUND_STRING, MMSOUND_FLUTE, MMSOUND_VIBES, MMSOUND_PLUCK,
-       MMSOUND_BRASS, MMSOUNDS };   /* and sounds */
+       MMSOUND_BRASS, MMSOUND_BANK, MMSOUNDS = MMSOUND_BANK + 38 };   /* and sounds; F6d-2: 38 of the bank (FM BELL: TUB BELLS, VIBES: STEEL DRUM) */
+const char *music_mel_sound_name(unsigned sound);
 #define MAUTO 0xFFu          /* a mode, sound or progression the style chooses */
 #define MSTYLE_BASE 0xFFu    /* a track that plays in the BASE style */
 

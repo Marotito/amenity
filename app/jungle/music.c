@@ -437,13 +437,91 @@ static void drift_chunk(unsigned n)
 }
 #define DRIFT(i) (1.0f + 0.0017f * drift[i])               /* +-3 cents */
 
+/* ------------------------------------------------------------ FM6 (F6d) --- */
+/* Marote (19 nov): the FM-1's own sounds are a DX7's, six operators; ours were two (a Sega Genesis's). So: msfa, the
+ * DX7 engine of Dexed, in Felucca's integer C port (fm6_core.h), playing M-VAVE's factory bank (fm6_factory.h), both
+ * Apache-2.0. A voice renders its own 32-sample blocks (from the sample it is struck: no block's wait), each block
+ * standing alone (its note, its LFO, its patch: a copy, so a sound changed mid-note never touches it) -- the shape
+ * a job for the second core needs. The patch: the 128-byte packed record unpacked to the 155-byte layout (Felucca's
+ * eng_fm6.c fm6_unpack, GPL-3.0-only). */
+struct fm6v { fm6_note_t n; fm6_lfo_t lfo; uint8_t p[FP_SIZE + 1]; float buf[FM6_N]; int pos, done; };
+static void fm6_unpack(const uint8_t *b, uint8_t *v)
+{
+    uint32_t k, i;
+    for (k = 0; k < 6u; k++) {
+        const uint8_t *o = b + k * 17u;
+        uint8_t *d = v + k * FP_OP;
+        for (i = 0; i < 11u; i++) d[i] = o[i] & 0x7Fu;
+        d[FP_LC] = o[11] & 3u; d[FP_RC] = (o[11] >> 2) & 3u;
+        d[FP_RS] = o[12] & 7u; d[FP_DET] = (o[12] >> 3) & 15u;
+        d[FP_AMS] = o[13] & 3u; d[FP_KVS] = (o[13] >> 2) & 7u;
+        d[FP_OL] = o[14] & 0x7Fu;
+        d[FP_MODE] = o[15] & 1u; d[FP_FC] = (o[15] >> 1) & 31u;
+        d[FP_FF] = o[16] & 0x7Fu;
+    }
+    for (i = 0; i < 9u; i++) v[FP_PR1 + i] = b[102 + i] & 0x7Fu;   /* pitch EG, algorithm */
+    v[FP_ALG] &= 31u;
+    v[FP_FB] = b[111] & 7u; v[FP_OKS] = (b[111] >> 3) & 1u;
+    for (i = 0; i < 4u; i++) v[FP_LFS + i] = b[112 + i] & 0x7Fu;
+    v[FP_LKS] = b[116] & 1u; v[FP_LFW] = (b[116] >> 1) & 7u; v[FP_LPMS] = (b[116] >> 4) & 7u;
+    v[FP_TRNSP] = b[117] & 0x7Fu;
+    for (i = 0; i < 10u; i++) v[FP_NAME + i] = b[118 + i] & 0x7Fu;
+}
+static void fm6_strike(struct fm6v *f, const uint8_t *patch, int midi, float vel)
+{
+    int v127 = (int)(vel * 100.0f), fresh = f->done || !f->n.live;
+    memcpy(f->p, patch, FP_SIZE);
+    fm6_note_init(&f->n, f->p, midi + (int)f->p[FP_TRNSP] - 24, v127 < 1 ? 1 : v127 > 127 ? 127 : v127, fresh);
+    fm6_lfo_reset(&f->lfo, f->p);
+    fm6_lfo_key(&f->lfo);
+    f->pos = FM6_N;   /* its first block: now */
+    f->done = 0;
+}
+static int32_t fm6_bright(float mul)   /* a knob's brightness (x0.25 .. x4) as the modulators' level: 6 dB a doubling */
+{
+    return (int32_t)(fm_log2f(mul) * 16777216.0f);
+}
+static int32_t fm6_p16(float hz)   /* a frequency as a pitch in 1/16 semitones (a glide, a vibrato) */
+{
+    return (int32_t)(16.0f * (12.0f * fm_log2f(hz * (1.0f / 440.0f)) + 69.0f));
+}
+static void fm6_block(struct fm6v *f, int32_t p16, int32_t modlvl)   /* the next 32 samples (floats, a carrier at full ~ 0.5) */
+{
+    int32_t bus[FM6_N], dt[6] = { 0, 0, 0, 0, 0, 0 };
+    int32_t lv = fm6_lfo_sample(&f->lfo), ld = fm6_lfo_delay(&f->lfo);
+    int32_t lf = fm6_note_logfreq(p16 + ((int)f->p[FP_TRNSP] - 24) * 16, 0);
+    f->pos = 0;
+    if (!fm6_note_compute(&f->n, f->p, bus, lv, ld, lf, f->p[FP_ALG], f->p[FP_FB], dt, modlvl)) {
+        for (int i = 0; i < FM6_N; ++i) f->buf[i] = 0.0f;
+        if (fm6_note_done(&f->n, f->p, f->p[FP_ALG])) f->done = 1;
+        return;
+    }
+    for (int i = 0; i < FM6_N; ++i) {   /* (Felucca's DC blocker: FM puts sidebands at 0 Hz) */
+        int32_t x = bus[i] - f->n.dc;
+        f->n.dc += x >> 10;
+        f->buf[i] = (float)x * (0.5f / 16777216.0f);
+    }
+}
 /* --------------------------------------------------------------- the bass --- */
 static struct {
     int mode; float ph[3], freq, target, env, fenv, gate_left, glide, acc, vel; struct svf f, f2; int on, rising, kc;
+    int fmb, keyed;   /* F6d-2: the bank's voice it plays (-1: ours), its keys still down */
 } bass;
+static struct fm6v fm6_bass;
+static uint8_t bass_patch[FP_SIZE + 1];
 static void bass_play(int midi, float gate_samples, int slide, int accent, float vel)
 {
     bass.target = mtof((float)midi);
+    if (bass.fmb >= 0) {   /* F6d-2: a voice of the bank; a slide glides it (no new attack) */
+        if (!(slide && bass.on && bass.gate_left > 0)) {
+            bass.freq = bass.target;
+            fm6_strike(&fm6_bass, bass_patch, midi, vel * (accent ? 1.0f : 0.85f));
+        }
+        bass.glide = slide ? bass_slide : 0.0015f;
+        bass.gate_left = gate_samples;
+        bass.on = bass.keyed = 1;
+        return;
+    }
     if (slide && bass.on && bass.gate_left > 0) {        /* a slide: no new attack, the pitch glides there */
         bass.glide = bass_slide;
         bass.gate_left = gate_samples;
@@ -465,6 +543,15 @@ static float bass_render(void)
 {
     if (!bass.on) return 0.0f;
     bass.freq += (bass.target - bass.freq) * bass.glide;
+    if (bass.fmb >= 0) {   /* F6d-2: its blocks; the gate's end lifts its keys; done when its carriers are */
+        struct fm6v *f = &fm6_bass;
+        if (bass.gate_left > 0.0f) bass.gate_left -= 1.0f;
+        else if (bass.keyed) { fm6_note_key(&f->n, f->p, 0); bass.keyed = 0; }
+        if (f->pos >= FM6_N) fm6_block(f, fm6_p16(bass.freq), fm6_bright(bass_cut));
+        float s = f->buf[f->pos++];
+        if (f->done) bass.on = 0;
+        return 0.8f * s;   /* (levels: as ours) */
+    }
     if (bass.rising) { bass.env += (1.0f - bass.env) * 0.02f; if (bass.env > 0.99f) bass.rising = 0; }
     float inc = bass.freq * (1.0f / SR), s, sub = 0.0f;
     int filtered = 1;
@@ -525,65 +612,45 @@ static float bass_render(void)
 
 /* ------------------------------------------------------- a 3-voice layer --- */
 enum { T_STRINGS, T_ORGAN, T_STAB, T_EPIANO, T_CLAVI, T_HARPSI, T_GUITAR, T_BRASS, T_FM6 };
-/* ------------------------------------------------------------ FM6 (F6d) --- */
-/* Marote (19 nov): the FM-1's own sounds are a DX7's, six operators; ours were two (a Sega Genesis's). So: msfa, the
- * DX7 engine of Dexed, in Felucca's integer C port (fm6_core.h), playing M-VAVE's factory bank (fm6_factory.h), both
- * Apache-2.0. A voice renders its own 32-sample blocks (from the sample it is struck: no block's wait), each block
- * standing alone (its note, its LFO, its patch: a copy, so a sound changed mid-note never touches it) -- the shape
- * a job for the second core needs. The patch: the 128-byte packed record unpacked to the 155-byte layout (Felucca's
- * eng_fm6.c fm6_unpack, GPL-3.0-only). */
-struct fm6v { fm6_note_t n; fm6_lfo_t lfo; uint8_t p[FP_SIZE + 1]; float buf[FM6_N]; int pos, done; };
-static void fm6_unpack(const uint8_t *b, uint8_t *v)
+static char hs_name[12];
+static struct fm6v fm6_rhy[3], fm6_pad[3], fm6_lead;
+static uint8_t rhy_patch[FP_SIZE + 1], pad_patch[FP_SIZE + 1], lead_patch[FP_SIZE + 1];
+static uint8_t pad_bank = 0xFF;
+/* the pad (F6d-2): a voice of the bank by the harmony's style: strings for breakcore and dub, pads for the rest */
+static const uint8_t PAD_BANK[MSTYLES] = { 66, 3, 7, 11, 70 };
+/* the bass's: our six (FM BASS plays BASS 1), then BASS 1..8, SYN BASS 1..8 */
+static const uint8_t BBANK[] = { 34, 38, 42, 46, 50, 54, 58, 62,  35, 39, 43, 47, 51, 55, 59, 63 };
+static int bbank_of(int snd) { return snd == MTIMBRE_FM ? 34 : snd >= MTIMBRE_BANK && snd < MTIMBRE_BANK + (int)sizeof BBANK ? BBANK[snd - MTIMBRE_BANK] : -1; }
+/* the melody's: our nine (FM BELL plays TUB BELLS, VIBES STEEL DRUM: the bank has no vibraphone), then SYN LEAD,
+ * WOODWIND, BRASS, VOICE 1..8, and six of its tuned percussion */
+static const uint8_t MBANK[] = { 2, 6, 10, 14, 18, 22, 26, 30,  65, 69, 73, 77, 81, 85, 89, 93,
+                                 64, 68, 72, 76, 80, 84, 88, 92,  67, 71, 75, 79, 83, 87, 91, 95,
+                                 117, 120, 113, 112, 101, 105 };
+static int mbank_of(int snd) { return snd == MMSOUND_FM ? 120 : snd == MMSOUND_VIBES ? 113 :
+                                      snd >= MMSOUND_BANK && snd < MMSOUND_BANK + (int)sizeof MBANK ? MBANK[snd - MMSOUND_BANK] : -1; }
+static const char *bank_name(int b)
 {
-    uint32_t k, i;
-    for (k = 0; k < 6u; k++) {
-        const uint8_t *o = b + k * 17u;
-        uint8_t *d = v + k * FP_OP;
-        for (i = 0; i < 11u; i++) d[i] = o[i] & 0x7Fu;
-        d[FP_LC] = o[11] & 3u; d[FP_RC] = (o[11] >> 2) & 3u;
-        d[FP_RS] = o[12] & 7u; d[FP_DET] = (o[12] >> 3) & 15u;
-        d[FP_AMS] = o[13] & 3u; d[FP_KVS] = (o[13] >> 2) & 7u;
-        d[FP_OL] = o[14] & 0x7Fu;
-        d[FP_MODE] = o[15] & 1u; d[FP_FC] = (o[15] >> 1) & 31u;
-        d[FP_FF] = o[16] & 0x7Fu;
-    }
-    for (i = 0; i < 9u; i++) v[FP_PR1 + i] = b[102 + i] & 0x7Fu;   /* pitch EG, algorithm */
-    v[FP_ALG] &= 31u;
-    v[FP_FB] = b[111] & 7u; v[FP_OKS] = (b[111] >> 3) & 1u;
-    for (i = 0; i < 4u; i++) v[FP_LFS + i] = b[112 + i] & 0x7Fu;
-    v[FP_LKS] = b[116] & 1u; v[FP_LFW] = (b[116] >> 1) & 7u; v[FP_LPMS] = (b[116] >> 4) & 7u;
-    v[FP_TRNSP] = b[117] & 0x7Fu;
-    for (i = 0; i < 10u; i++) v[FP_NAME + i] = b[118 + i] & 0x7Fu;
+    int n = 0;
+    for (int i = 0; i < 10; ++i) hs_name[n++] = (char)(FM6_BANK[b][118 + i] & 0x7F);
+    while (n > 0 && hs_name[n - 1] == ' ') --n;
+    hs_name[n] = 0;
+    for (int i = 0; i < n; ++i) if (hs_name[i] >= 'a' && hs_name[i] <= 'z') hs_name[i] = (char)(hs_name[i] - 32);
+    return hs_name;
 }
-static void fm6_strike(struct fm6v *f, const uint8_t *patch, int midi, float vel)
+const char *music_bass_sound_name(unsigned snd)
 {
-    int v127 = (int)(vel * 100.0f);
-    memcpy(f->p, patch, FP_SIZE);
-    fm6_note_init(&f->n, f->p, midi + (int)f->p[FP_TRNSP] - 24, v127 < 1 ? 1 : v127 > 127 ? 127 : v127, 1);
-    fm6_lfo_reset(&f->lfo, f->p);
-    fm6_lfo_key(&f->lfo);
-    f->pos = FM6_N;   /* its first block: now */
-    f->done = 0;
+    static const char *const OURS[MTIMBRE_BANK] = { "SUB", "ACID", "REESE", "FINGER", "FM BASS", "DUB" };
+    if (snd < MTIMBRE_BANK) return OURS[snd];
+    int b = bbank_of((int)snd);
+    return b < 0 ? "?" : bank_name(b);
 }
-static void fm6_block(struct fm6v *f, int midi)   /* the next 32 samples (floats, a carrier at full ~ 0.5) */
+const char *music_mel_sound_name(unsigned snd)
 {
-    int32_t bus[FM6_N], dt[6] = { 0, 0, 0, 0, 0, 0 };
-    int32_t lv = fm6_lfo_sample(&f->lfo), ld = fm6_lfo_delay(&f->lfo);
-    int32_t lf = fm6_note_logfreq((midi + (int)f->p[FP_TRNSP] - 24) * 16, 0);
-    f->pos = 0;
-    if (!fm6_note_compute(&f->n, f->p, bus, lv, ld, lf, f->p[FP_ALG], f->p[FP_FB], dt, 0)) {
-        for (int i = 0; i < FM6_N; ++i) f->buf[i] = 0.0f;
-        if (fm6_note_done(&f->n, f->p, f->p[FP_ALG])) f->done = 1;
-        return;
-    }
-    for (int i = 0; i < FM6_N; ++i) {   /* (Felucca's DC blocker: FM puts sidebands at 0 Hz) */
-        int32_t x = bus[i] - f->n.dc;
-        f->n.dc += x >> 10;
-        f->buf[i] = (float)x * (0.5f / 16777216.0f);
-    }
+    static const char *const OURS[MMSOUND_BANK] = { "SAW", "SQUARE", "FM BELL", "REED", "STRING", "FLUTE", "VIBES", "PLUCK", "BRASS" };
+    if (snd < MMSOUND_BANK) return OURS[snd];
+    int b = mbank_of((int)snd);
+    return b < 0 ? "?" : bank_name(b);
 }
-static struct fm6v fm6_rhy[3];
-static uint8_t rhy_patch[FP_SIZE + 1];
 /* the harmony's sounds from the bank (after the seven of ours; EPIANO plays PIANO 1 since F6d): the pianos (1, 5, 7, 8:
  * the DX7's Rhodes), organs, guitars, brass, strings, pads */
 static const uint8_t HBANK[] = {
@@ -592,19 +659,12 @@ static const uint8_t HBANK[] = {
     3, 7, 11, 15, 19, 23, 27, 31 };
 enum { HS_OURS = MHSOUND_BANK };
 static int hbank_of(int snd) { return snd == MHSOUND_EPIANO ? 0 : snd >= HS_OURS && snd < HS_OURS + (int)sizeof HBANK ? HBANK[snd - HS_OURS] : -1; }
-static char hs_name[12];
 const char *music_harm_sound_name(unsigned snd)
 {
     static const char *const OURS[HS_OURS] = { "ORGAN", "SAW", "EPIANO", "CLAVI", "HARPSI", "GUITAR", "BRASS" };
     if (snd < HS_OURS) return OURS[snd];
     int b = hbank_of((int)snd);
-    if (b < 0) return "?";
-    int n = 0;
-    for (int i = 0; i < 10; ++i) hs_name[n++] = (char)(FM6_BANK[b][118 + i] & 0x7F);
-    while (n > 0 && hs_name[n - 1] == ' ') --n;
-    hs_name[n] = 0;
-    for (int i = 0; i < n; ++i) if (hs_name[i] >= 'a' && hs_name[i] <= 'z') hs_name[i] = (char)(hs_name[i] - 32);
-    return hs_name;
+    return b < 0 ? "?" : bank_name(b);
 }
 #define T_PLUCKED(t) ((t) == T_CLAVI || (t) == T_HARPSI || (t) == T_GUITAR)
 struct fm6v;   /* F6d: a voice's FM6 note (below) */
@@ -612,6 +672,7 @@ struct voice { float ph[4], freq, env, fenv, vel, wait; int stage, gate, kc, kin
 struct layer {
     struct voice v[3]; int voicing[3], lo, hi;
     int timbre; float sus, cut, famt, k, gain, ca, cd, cr, pan0, dec0, rel0;
+    uint8_t *patch;   /* F6d: its FM6 voices' patch */
 };
 static struct layer pad, rhy;
 static void layer_shape(struct layer *L, int timbre, float atk, float dec, float sus, float rel,
@@ -643,7 +704,7 @@ static void voice_lead(struct layer *L, const int pcs[3])   /* each voice: its c
     }
     L->voicing[0] = best[0]; L->voicing[1] = best[1]; L->voicing[2] = best[2];
 }
-static void voice_strike(struct voice *h, int kind);
+static void voice_strike(struct layer *L, struct voice *h, int kind);
 static const int TRIAD[3] = { 0, 1, 2 }, COLOUR[3] = { 1, 2, 3 };
 static void layer_chord(struct layer *L, const struct chord *c, const int idx[3], int octave_up, float vel,
                         int gate_steps, int legato, float strum)   /* strum: samples between voices, up or down */
@@ -656,13 +717,14 @@ static void layer_chord(struct layer *L, const struct chord *c, const int idx[3]
         struct voice *h = &L->v[v];
         h->midi = L->voicing[v] + 12 * octave_up;
         h->freq = mtof((float)h->midi);
-        if (!legato || h->stage == 0 || h->stage == 3) { h->stage = 1; if (!legato) h->env = 0; }
+        int attack = !legato || h->stage == 0 || h->stage == 3;   /* (F6d-2: a new attack strikes an FM6 voice again) */
+        if (attack) { h->stage = 1; if (!legato) h->env = 0; }
         h->fenv = 1.0f;
         h->kc = 0;
         h->vel = vel;
         h->gate = gate_steps;
         h->wait = 0.0f;
-        if (!legato || !h->kind) voice_strike(h, L->timbre);
+        if (attack || !h->kind || h->kind != L->timbre) voice_strike(L, h, L->timbre);
         if (strum > 0.0f && !legato) {   /* in pitch order, up or down; each voice a little apart in loudness too */
             int rank = 0;
             for (int o = 0; o < 3; ++o) if (L->voicing[o] < L->voicing[v]) ++rank;
@@ -675,7 +737,7 @@ static void layer_release(struct layer *L)
 {
     for (int v = 0; v < 3; ++v) if (L->v[v].stage && L->v[v].stage != 3) L->v[v].stage = 3;
 }
-static void voice_strike(struct voice *h, int kind)   /* F6b: a voice sounds as it was struck (a sound changed: no old line) */
+static void voice_strike(struct layer *L, struct voice *h, int kind)   /* F6b: a voice sounds as it was struck (a sound changed: no old line) */
 {
     h->kind = kind;
     float hz = h->freq, v = h->vel;
@@ -684,7 +746,7 @@ static void voice_strike(struct voice *h, int kind)   /* F6b: a voice sounds as 
     case T_HARPSI: ks_pluck(&h->str, hz, 0.9f, 0.08f, 2.2f, v, 0.07f); break;     /* brighter still, the quill */
     case T_GUITAR: ks_pluck(&h->str, hz, 0.45f, 0.3f, 0.35f, v, 0.2f); break;     /* the palm on it: short */
     case T_EPIANO: case T_BRASS: h->ph[0] = h->ph[1] = h->ph[2] = 0.0f; break;
-    case T_FM6: if (h->fm) fm6_strike(h->fm, rhy_patch, h->midi, v); else h->kind = T_STAB; break;
+    case T_FM6: if (h->fm && L->patch) fm6_strike(h->fm, L->patch, h->midi, v); else h->kind = T_STAB; break;
     default: break;
     }
 }
@@ -733,7 +795,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
         case T_FM6: {   /* F6d: its own blocks; the gate's end lifts the keys; done when its carriers are */
             struct fm6v *f = h->fm;
             if (h->stage == 3 && f->n.down) fm6_note_key(&f->n, f->p, 0);
-            if (f->pos >= FM6_N) fm6_block(f, h->midi);
+            if (f->pos >= FM6_N) fm6_block(f, h->midi * 16, fm6_bright(h_bright * fbright));
             s = f->buf[f->pos++];
             if (f->done) h->stage = 0;
             break;
@@ -932,7 +994,7 @@ set:
         int bk = hbank_of(snd);
         if (bk >= 0) {   /* F6d: a voice of the bank; its own envelopes shape it (the layer's: open, a long release) */
             fm6_unpack(FM6_BANK[bk], rhy_patch);
-            layer_shape(&rhy, T_FM6, 0.3f, 50, 1.0f, 6000, 0, 0, 1.0f, 0.5f);
+            layer_shape(&rhy, T_FM6, 0.3f, 50, 1.0f, 6000, 0, 0, 1.0f, 0.4f);
             snd = -1;
         }
         switch (snd) {
@@ -979,8 +1041,11 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
     else if (harm_mode_now != MAUTO) pad_on = 0;
     else if (form_on && sect()->harm != H_RHY) pad_on = 1;   /* the section's pad */
     else if (--pad_left <= 0) { pad_on = rnd(100) < S->pad_pct; pad_left = 2 + (int)rnd(3); }   /* AUTO: a few phrases */
-    if (pad_on) layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 1, 0.0f);
-    else layer_release(&pad);
+    if (pad_on) {
+        int b = stress ? 1 : PAD_BANK[track_style(TRK_HARMONY)];   /* F6d-2: the pad from the bank (the CPU test: ORGAN 1) */
+        if (b != pad_bank) { fm6_unpack(FM6_BANK[b], pad_patch); pad_bank = (uint8_t)b; for (int v = 0; v < 3; ++v) pad.v[v].kind = 0; }
+        layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 1, 0.0f);
+    } else layer_release(&pad);
 }
 
 /* ------------------------------------------------------- the bass line --- */
@@ -1101,6 +1166,12 @@ static void bass_plan(void)   /* the bass track's own phrase starts */
         b_left = 2 + (int)rnd(3);
     }
     bass_sound_now = c_timbre == MAUTO ? S->bass_sound : c_timbre;
+    {   /* F6d-2: a voice of the bank: its patch now (the note sounding keeps its copy) */
+        int b = bbank_of(bass_sound_now);
+        if (b >= 0 && b != bass.fmb) fm6_unpack(FM6_BANK[b], bass_patch);
+        if (b < 0 && bass.fmb >= 0) bass.on = 0;
+        bass.fmb = b;
+    }
     memset(bseq, 0, sizeof bseq);
     switch (bmode) {
     case MBASS_LONG:
@@ -1140,6 +1211,10 @@ static void bass_plan(void)   /* the bass track's own phrase starts */
 }
 static void bass_step(int v)
 {
+    if (stress) {   /* the CPU test (F6d-2): ORGAN 1, six carriers, held */
+        if (v == 0) { fm6_unpack(FM6_BANK[1], bass_patch); bass.fmb = 1; bass_play(root_midi(cur_chord), 40.0f * vsps(TRK_BASS), 0, 1, 1.0f); }
+        return;
+    }
     if (v == 0) bass_plan();
     if (bmode == MBASS_KICK || jungle_roll_active() == 1) return;   /* BUILD: the bass waits for the drop */
     if (form_hole(TRK_BASS)) { bass.gate_left = 0.0f; return; }
@@ -1186,7 +1261,7 @@ void music_mel_seed(unsigned i) { c_mseed = (uint8_t)(i < NSEEDS ? i : MAUTO); }
 /* each style: its seeds (AUTO), its modes' weights (SEED RIFF LINE ANSWER), its sound */
 static const struct { uint8_t n, seeds[5], w[MMEL_MODES], sound; } MSTY[MSTYLES] = {
     { 4, { 0, 1, 2, 3 }, { 60, 0, 40, 0 }, MMSOUND_STRING },          /* breakcore */
-    { 3, { 9, 8, 5 }, { 20, 0, 50, 30 }, MMSOUND_VIBES },             /* jazz */
+    { 3, { 9, 8, 5 }, { 20, 0, 50, 30 }, MMSOUND_BANK + 8 },          /* jazz: WOODWIND 1 (F6d-2) */
     { 3, { 3, 1, 8 }, { 20, 80, 0, 0 }, MMSOUND_SQUARE },             /* acid */
     { 4, { 4, 2, 5, 9 }, { 20, 50, 0, 30 }, MMSOUND_SAW },            /* hip hop */
     { 3, { 7, 6, 4 }, { 30, 0, 0, 70 }, MMSOUND_REED },               /* dub */
@@ -1196,10 +1271,18 @@ static const struct { uint8_t n, seeds[5], w[MMEL_MODES], sound; } MSTY[MSTYLES]
 static struct {
     int on, stage, sound, kc; float ph[2], freq, target, env, fenv, vel, gate_left, vib_ph, age, ca, cd, cr; struct svf f;
     struct ks str; float scoop, swell;   /* F6b: the plucked line, a reed's or a brass's pitch coming up into the note, the swell */
+    int fmb, keyed;                      /* F6d-2: the bank's voice it plays (-1: ours), its keys still down */
 } lead;
 static void lead_note(int midi, float gate, float vel)
 {
     lead.target = mtof((float)midi);
+    if (lead.fmb >= 0) {   /* F6d-2: a voice of the bank; with the glide on, a note into a held one glides (legato) */
+        int legato = lead.on && lead.stage != 3 && m_glide > 0.0f;
+        if (!legato) { lead.freq = lead.target; fm6_strike(&fm6_lead, lead_patch, midi, vel); }
+        lead.stage = 1; lead.on = lead.keyed = 1; lead.vel = vel;
+        lead.gate_left = gate;
+        return;
+    }
     if (!lead.on || m_glide <= 0.0f || lead.stage == 3) lead.freq = lead.target;
     if (!lead.on || lead.stage == 3) {
         lead.ph[0] = 0.0f;
@@ -1225,6 +1308,19 @@ static float lead_render(void)
     static const float REL[MMSOUNDS] = { 80.0f, 40.0f, 400.0f, 90.0f, 250.0f, 120.0f, 900.0f, 60.0f, 90.0f };
     static const float SUS[MMSOUNDS] = { 0.8f, 0.75f, 0.0f, 0.85f, 0.9f, 0.8f, 0.0f, 1.0f, 0.8f };
     if (!lead.on) return 0.0f;
+    if (lead.fmb >= 0) {   /* F6d-2: its blocks; the glide, the vibrato (once a block); the gate's end lifts its keys */
+        struct fm6v *f = &fm6_lead;
+        if (m_glide > 0.0f) lead.freq += (lead.target - lead.freq) * m_glide; else lead.freq = lead.target;
+        lead.vib_ph += 5.5f / SR;
+        if (lead.vib_ph >= 1.0f) lead.vib_ph -= 1.0f;
+        if (lead.stage != 3 && lead.gate_left > 0.0f && (lead.gate_left -= 1.0f) <= 0.0f) lead.stage = 3;
+        if (lead.stage == 3 && lead.keyed) { fm6_note_key(&f->n, f->p, 0); lead.keyed = 0; }
+        if (f->pos >= FM6_N)
+            fm6_block(f, fm6_p16(lead.freq * (1.0f + m_vib * 0.0578f * sine(lead.vib_ph))), fm6_bright(m_bright));
+        float s = f->buf[f->pos++];
+        if (f->done) lead.on = 0;
+        return 0.95f * s;   /* (levels: as ours) */
+    }
     int snd = lead.sound;
     float s;
     int kr = --lead.kc <= 0;   /* the coefficients (filter, envelope): every 16 samples (F6a) */
@@ -1396,6 +1492,12 @@ static void mel_plan(void)   /* the melody track's own phrase starts */
     }
     mel_sound_now = c_msound == MAUTO ? MSTY[st].sound : c_msound;
     lead.sound = mel_sound_now;
+    {   /* F6d-2: a voice of the bank: its patch now */
+        int b = mbank_of(mel_sound_now);
+        if (b >= 0 && b != lead.fmb) fm6_unpack(FM6_BANK[b], lead_patch);
+        if (b < 0 && lead.fmb >= 0) lead.on = 0;
+        lead.fmb = b;
+    }
     if (c_mseed != MAUTO) mel_seed_now = c_mseed;
     else if (m_phrase % 4u == 0) mel_seed_now = MSTY[st].seeds[rnd(MSTY[st].n)];
     const struct seed *sd = &SEEDS[mel_seed_now];
@@ -1622,6 +1724,10 @@ static void mel_sound(const struct mev *e, int v, int duck)
 }
 static void mel_step(int v)
 {
+    if (stress) {   /* the CPU test (F6d-2): ORGAN 1, six carriers, held */
+        if (v == 0) { fm6_unpack(FM6_BANK[1], lead_patch); lead.fmb = 1; lead_note(72, 40.0f * vsps(TRK_MELODY), 1.0f); }
+        return;
+    }
     if (v == 0) { mel_plan(); mel_fit(); mel_shape(); }
     if (form_hole(TRK_MELODY)) { if (lead.stage != 3) lead.stage = 3; mpend.v = -1; return; }
     if (!mseq[v].on) return;
@@ -1845,7 +1951,10 @@ void music_init(void)
 {
     for (int i = 0; i < 1024; ++i) sine_tab[i] = fm_sinf(6.2831853f * (float)i * (1.0f / 1024.0f));
     pad.lo = 55; pad.hi = 74; pad.pan0 = 0.3f;
-    layer_shape(&pad, T_STRINGS, 180, 400, 0.85f, 600, 900, 0, 0.7f, 0.20f);
+    layer_shape(&pad, T_FM6, 180, 400, 1.0f, 600, 900, 0, 0.7f, 0.32f);   /* F6d-2: FM6 (the layer's envelope: a fade) */
+    pad.patch = pad_patch; rhy.patch = rhy_patch;
+    for (int v = 0; v < 3; ++v) pad.v[v].fm = &fm6_pad[v];
+    bass.fmb = lead.fmb = -1;
     rhy.pan0 = 0.4f;
     pad.voicing[0] = rhy.voicing[0] = 60; pad.voicing[1] = rhy.voicing[1] = 64; pad.voicing[2] = rhy.voicing[2] = 67;
     rhythm_set(R_SKANK);
