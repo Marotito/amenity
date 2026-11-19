@@ -375,7 +375,8 @@ static PLAT_RAM_CODE __attribute__((noinline)) void fm6_op_fb(int32_t *out, int3
 }
 
 /* msfa FmCore::render: the six operators of algorithm alg into out (Q24). Unlike msfa, out starts empty:
- * the first carrier sounding writes it, the next ones add. Returns 0 when none sounded (out untouched). The two buses
+ * the first carrier sounding writes it, the next ones add. Returns bit 0: a carrier sounded (0: out untouched); the
+ * bits above it: the operators that ran (Amenity+ OPT). The two buses
  * are this call's (a bus is read only after this call wrote it: has[]): with two cores on the stack (each core its
  * own), with one in .bss as up to 1.6 (the ISR's stack as it was) */
 static PLAT_RAM_CODE __attribute__((noinline)) int fm6_core_render(int32_t *out, fm6_op_t *op, uint32_t alg, int32_t *fb, int32_t fb_shift)
@@ -383,7 +384,7 @@ static PLAT_RAM_CODE __attribute__((noinline)) int fm6_core_render(int32_t *out,
     int32_t fm6_bus[2][FM6_N];
     const uint8_t *a = FM6_ALG[alg & 31u];
     uint8_t has[3] = {0, 0, 0};
-    uint32_t k;
+    uint32_t k, ran = 0;
     for (k = 0; k < 6u; k++) {
         uint32_t f = a[k], inbus = (f >> 4) & 3u, outbus = f & 3u;
         int add = (f & FM6_OADD) != 0;
@@ -402,12 +403,13 @@ static PLAT_RAM_CODE __attribute__((noinline)) int fm6_core_render(int32_t *out,
                 fm6_op_run(o, fm6_bus[inbus - 1u], op[k].phase, op[k].freq, g1, g2, add);
             }
             has[outbus] = 1;
+            ++ran;
         } else if (!add) {
             has[outbus] = 0;
         }
         op[k].phase = (int32_t)((uint32_t)op[k].phase + ((uint32_t)op[k].freq << FM6_LG_N));
     }
-    return has[0];
+    return (int)(has[0] | ran << 1);   /* (Amenity+ OPT: and how many operators ran, for the governor's cost) */
 }
 
 /* ------------------------------------------------------------ the note --- */

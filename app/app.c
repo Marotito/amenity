@@ -11,7 +11,7 @@
  *   SELECT tempo (1 BPM; SEL held: 0.1)  SEL + OCT- / OCT+ 0.1 BPM  OCT- / OCT+ halve / double tempo
  *   PLAY start/stop  REC freeze  SEQ fill  HOME straight break
  *   EDIT held: the audio's CPU load in the header, and its parts (B the break, T the tracks, F the effects; FM6
- *              voices sounding / allowed, - those the governor let go)
+ *              voices' cost / the governor's budget, ! the blocks over 90 % it answered)
  *   ENV: EQ page (K1-K4: 100 Hz, 500 Hz, 2.5 kHz, 8 kHz)  FX tap: FX page (K1 saturation, K2 compression, K3 LO-FI)
  *   MIDI clock: a Start or Continue from an input leads (EXT; PLAY and tempo rest); on its own clock AMENITY
  *   sends Start, clock and Stop.
@@ -1418,7 +1418,7 @@ static void draw(void)
             int32_t xc = 234 - text_w(&FONT_M, t);
             cv_text(xc, 4, &FONT_M, t, C_ORANGE);
             {   /* Amenity+ OPT: the parts (% of the block: the break, the tracks, the effects) and the FM6 voices
-                 * (sounding / allowed, and how many the governor let go since power-on) */
+                 * (their cost / the governor's budget, and ! the blocks over 90 % since power-on) */
                 static const char *const NAME[3] = { "B", " T", " F" };
                 char u[40];
                 struct music_meter m;
@@ -1431,10 +1431,10 @@ static void draw(void)
                 music_meter_peek(&m);
                 u[0] = 0;
                 text_cat(u, "FM ");
-                int_text(m.fm_live, u + text_len(u));
+                int_text(m.fm_cost, u + text_len(u));
                 text_cat(u, "/");
-                int_text(m.fm_cap, u + text_len(u));
-                text_cat(u, " -");
+                int_text(m.fm_budget, u + text_len(u));
+                text_cat(u, " !");
                 int_text((int32_t)m.shed, u + text_len(u));
                 cv_text(xc - 6 - text_w(&FONT_XS, u), 17, &FONT_XS, u, m.shed ? C_ORANGE : C_GRAY);
             }

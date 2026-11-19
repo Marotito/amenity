@@ -47,28 +47,6 @@ static float saw(float *ph, float inc)
     if (*ph >= 1.0f) *ph -= 1.0f;
     return s;
 }
-/* the state-variable low-pass (TPT): its coefficients set now and then (svf_set: every 16 samples, F6a), run each sample */
-struct svf { float ic1, ic2, g, a1, a2; };
-static void svf_set(struct svf *f, float g, float k)
-{
-    f->g = g;
-    f->a1 = 1.0f / (1.0f + g * (g + k));
-    f->a2 = g * f->a1;
-}
-static float svf_run(struct svf *f, float x)
-{
-    float v3 = x - f->ic2;
-    float v1 = f->a1 * f->ic1 + f->a2 * v3, v2 = f->ic2 + f->g * v1;
-    f->ic1 = 2.0f * v1 - f->ic1;
-    f->ic2 = 2.0f * v2 - f->ic2;
-    return v2;
-}
-static float g_of(float hz)   /* tan(pi f / SR), a polynomial: no libm per sample */
-{
-    hz = hz < 30.0f ? 30.0f : hz > 16000.0f ? 16000.0f : hz;
-    float x = 3.14159265f * hz * (1.0f / SR), x2 = x * x;
-    return x * (1.0f + x2 * (0.33333f + x2 * 0.13333f));
-}
 #define MUS_AI static inline __attribute__((always_inline))   /* OPT: a helper the RAM code uses: no copy in the flash */
 /* fastmath.h's, as they are, always inlined (the compiler may keep a plain static inline out of line, in the flash) */
 typedef union { float f; uint32_t u; int32_t i; } mus_bits_t;
@@ -105,6 +83,30 @@ MUS_AI float mus_tanhf(float x)
     e = mus_exp2f(2.0f * FM_LOG2E * a);
     r = 1.0f - 2.0f / (e + 1.0f);
     return x > 0.0f ? r : -r;
+}
+/* OPT: a decay that would sink into the denormals (slow on some FPUs: the host's 10 to 100 times) stops at 0 instead */
+MUS_AI float dn(float x) { return mus_fabsf(x) < 1e-15f ? 0.0f : x; }
+/* the state-variable low-pass (TPT): its coefficients set now and then (svf_set: every 16 samples, F6a), run each sample */
+struct svf { float ic1, ic2, g, a1, a2; };
+static void svf_set(struct svf *f, float g, float k)
+{
+    f->g = g;
+    f->a1 = 1.0f / (1.0f + g * (g + k));
+    f->a2 = g * f->a1;
+}
+static float svf_run(struct svf *f, float x)
+{
+    float v3 = x - f->ic2;
+    float v1 = f->a1 * f->ic1 + f->a2 * v3, v2 = f->ic2 + f->g * v1;
+    f->ic1 = dn(2.0f * v1 - f->ic1);   /* (OPT: silent in, it would sink into the denormals) */
+    f->ic2 = dn(2.0f * v2 - f->ic2);
+    return v2;
+}
+static float g_of(float hz)   /* tan(pi f / SR), a polynomial: no libm per sample */
+{
+    hz = hz < 30.0f ? 30.0f : hz > 16000.0f ? 16000.0f : hz;
+    float x = 3.14159265f * hz * (1.0f / SR), x2 = x * x;
+    return x * (1.0f + x2 * (0.33333f + x2 * 0.13333f));
 }
 MUS_AI float soft(float x) { return x / (1.0f + mus_fabsf(x)); }
 static float sine_tab[1024];
@@ -456,6 +458,7 @@ static float ks_run(struct ks *k)
     float f = (y + (k->prev - y) * k->damp) * k->loss;     /* the loss: a little low-pass, a little less each time */
     k->prev = y;
     float a = k->apc * f + k->apx - k->apc * k->apy;       /* the tuning */
+    a = dn(a);                                              /* (OPT: a damped string sinks into the denormals) */
     k->apx = f; k->apy = a;
     k->b[k->w] = a;
     if (++k->w >= k->n) k->w = 0;
@@ -481,7 +484,7 @@ static void drift_chunk(unsigned n)
  * standing alone (its note, its LFO, its patch: a copy, so a sound changed mid-note never touches it) -- the shape
  * a job for the second core needs. The patch: the 128-byte packed record unpacked to the 155-byte layout (Felucca's
  * eng_fm6.c fm6_unpack, GPL-3.0-only). */
-struct fm6v { fm6_note_t n; fm6_lfo_t lfo; uint8_t p[FP_SIZE + 1]; float buf[FM6_N]; int pos, done; };
+struct fm6v { fm6_note_t n; fm6_lfo_t lfo; uint8_t p[FP_SIZE + 1]; float buf[FM6_N]; int pos, done, ops; };   /* ops: its last block's (OPT) */
 static void fm6_unpack(const uint8_t *b, uint8_t *v)
 {
     uint32_t k, i;
@@ -513,6 +516,7 @@ static void fm6_strike(struct fm6v *f, const uint8_t *patch, int midi, float vel
     fm6_lfo_key(&f->lfo);
     f->pos = FM6_N;   /* its first block: now */
     f->done = 0;
+    f->ops = 6;       /* (the governor: the dearest, till its first block says) */
 }
 static int32_t fm6_bright(float mul)   /* a knob's brightness (x0.25 .. x4) as the modulators' level: 6 dB a doubling */
 {
@@ -527,8 +531,11 @@ static void fm6_block(struct fm6v *f, int32_t p16, int32_t modlvl)   /* the next
     int32_t bus[FM6_N], dt[6] = { 0, 0, 0, 0, 0, 0 };
     int32_t lv = fm6_lfo_sample(&f->lfo), ld = fm6_lfo_delay(&f->lfo);
     int32_t lf = fm6_note_logfreq(p16 + ((int)f->p[FP_TRNSP] - 24) * 16, 0);
+    if (c_stress) modlvl = 2 << 24;   /* the CPU test: the brightness up (+12 dB): no operator below the renderer's floor */
     f->pos = 0;
-    if (!fm6_note_compute(&f->n, f->p, bus, lv, ld, lf, f->p[FP_ALG], f->p[FP_FB], dt, modlvl)) {
+    int r = fm6_note_compute(&f->n, f->p, bus, lv, ld, lf, f->p[FP_ALG], f->p[FP_FB], dt, modlvl);
+    f->ops = r >> 1;
+    if (!(r & 1)) {
         for (int i = 0; i < FM6_N; ++i) f->buf[i] = 0.0f;
         if (fm6_note_done(&f->n, f->p, f->p[FP_ALG])) f->done = 1;
         return;
@@ -640,7 +647,7 @@ static float bass_render(void)
         if (bass.mode == MTIMBRE_ACID) s = 1.3f * svf_run(&bass.f2, s);
     }
     s += sub;
-    bass.fenv *= bass.mode == MTIMBRE_ACID ? 0.9993f : 0.9996f;
+    bass.fenv = dn(bass.fenv * (bass.mode == MTIMBRE_ACID ? 0.9993f : 0.9996f));
     if (bass.gate_left > 0) bass.gate_left -= 1.0f;
     else bass.env *= bass.mode == MTIMBRE_ACID ? 0.9975f : bass.mode == MTIMBRE_SUB || bass.mode == MTIMBRE_UPRIGHT ? 0.9985f : 0.9992f;
     if (bass.env < 1e-4f) { bass.on = 0; bass.env = 0; }
@@ -774,16 +781,20 @@ static void layer_release(struct layer *L)
 {
     for (int v = 0; v < 3; ++v) if (L->v[v].stage && L->v[v].stage != 3) L->v[v].stage = 3;
 }
-/* OPT: the governor. The FM-1 says a block took over 90 % of its time (APP_OVERLOAD: music_overload): the harmony's
- * FM6 voices give way, the pad's first (a release before a held note, the quietest first), then the rhythm layer's;
- * never the bass or the melody. A voice let go fades in ~8 ms (no click), and the FM6 voices allowed (fm_cap) come down
- * to what was left: a new chord's voice past that does not sound. After 4 s with no overload and the load under 75 %,
- * one more voice is allowed, up to all eight */
+/* OPT: the governor (fm1_open's way: a cost per voice, a capacity that learns). An FM6 voice costs the operators its
+ * last block ran plus one (its envelopes, its LFO): 7 at most, 56 the eight. The FM6 voices sounding may cost
+ * fm_budget: a harmony voice struck past it takes a releasing one's place, else it does not sound; past it after a
+ * block (a bass or a melody note, a voice that grew), the harmony's give way, the pad's first, the releasing and the
+ * quietest first, with an 8 ms fade. Never the bass or the melody. A block over 90 % of its time (APP_OVERLOAD:
+ * music_overload) brings the budget under what sounded then, and that is the ceiling it learns for a minute, then
+ * comes up 2 every 10 s; with no overload for 2 s and the load under 70 % the budget grows 2, never past the ceiling */
+enum { FM_COST_MAX = 56, FM_BUDGET0 = 44, FM_BUDGET_MIN = 14 };
 static volatile int ov_flag;
-static int fm_cap = 8, ov_hold, cpu_hint;
-static float ov_calm;
+static int fm_budget = FM_BUDGET0, fm_ceil = FM_COST_MAX, ov_hold, cpu_hint;
+static float ov_calm, ov_relax;
 static unsigned ov_shed;
-static int fm_live(void);
+static int fm_cost(void);
+static int fm_make_room(int need, int releasing_only);
 static void voice_strike(struct layer *L, struct voice *h, int kind)   /* F6b: a voice sounds as it was struck (a sound changed: no old line) */
 {
     h->kind = kind;
@@ -796,7 +807,13 @@ static void voice_strike(struct layer *L, struct voice *h, int kind)   /* F6b: a
     case T_EPIANO: case T_BRASS: h->ph[0] = h->ph[1] = h->ph[2] = 0.0f; break;
     case T_FM6:
         if (!h->fm || !L->patch) { h->kind = T_STAB; break; }
-        if (h->stage && fm_live() > fm_cap) { h->stage = 0; break; }   /* OPT: past the governor's voices: not this one */
+        if (h->stage) {   /* OPT: the governor's budget: room for this voice at its dearest (itself left out, if it was
+                           * sounding: struck again, it costs no more than before), else it does not sound */
+            h->kill = 1;
+            int over = fm_cost() + 7 - fm_budget;
+            h->kill = 0;
+            if (over > 0 && fm_make_room(over, 1) < over) { h->stage = 0; break; }
+        }
         fm6_strike(h->fm, L->patch, h->midi, v);
         break;
     default: break;
@@ -823,7 +840,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
             h->ph[0] += inc; h->ph[1] += inc * 2.0f; h->ph[2] += inc * 3.0f; h->ph[3] += inc * 4.0f;
             for (int k = 0; k < 4; ++k) if (h->ph[k] >= 1.0f) h->ph[k] -= 1.0f;
             s += 0.35f * h->fenv * h->vel * sine(h->ph[3] * 2.0f);   /* the click: harder on an accent */
-            h->fenv *= 0.9985f;
+            h->fenv = dn(h->fenv * 0.9985f);
             break;
         case T_EPIANO: {   /* a Rhodes: two operators 1:1, the bark dying away; the tine (14:1) a moment */
             float idx = (0.12f + 0.5f * h->fenv * h->vel) * h_bright;
@@ -834,7 +851,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
             h->ph[0] += inc; if (h->ph[0] >= 1.0f) h->ph[0] -= 1.0f;
             h->ph[1] += inc; if (h->ph[1] >= 1.0f) h->ph[1] -= 1.0f;
             h->ph[2] += inc * 14.0f; if (h->ph[2] >= 1.0f) h->ph[2] -= (float)(int)h->ph[2];
-            h->fenv *= 0.99988f;
+            h->fenv = dn(h->fenv * 0.99988f);
             break;
         }
         case T_CLAVI: case T_HARPSI: case T_GUITAR:
@@ -861,7 +878,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
                 h->kc = 16;
             }
             s = svf_run(&h->f, s);
-            h->fenv *= 0.9996f;
+            h->fenv = dn(h->fenv * 0.9996f);
             break;
         }
         default:
@@ -871,7 +888,7 @@ static void layer_render(struct layer *L, float *l, float *r, float g_moving)
                 h->kc = 16;
             }
             s = svf_run(&h->f, s);
-            h->fenv *= 0.9992f;
+            h->fenv = dn(h->fenv * 0.9992f);
             break;
         }
         s *= h->env * L->gain * (h->kind == T_FM6 ? 1.0f : h->vel);   /* (FM6: the velocity is in its operators) */
@@ -922,6 +939,9 @@ static void rhythm_set(int r)
 
 static const int8_t FAMILY[MD_COUNT] = { 0, 0, 0, 0, 1, 1, 1, 2 };
 static const char *const MD_NAME[MD_COUNT] = { "A", "B", "C", "D", "J COMP", "J HEMIOLA", "J PUSH", "STABS" };
+/* the CPU test's sound (EDIT + GLO): SYN PAD 1, its six operators all sounding while held (F6d-2 held ORGAN 1, whose
+ * quieter operators the renderer skips: the test came out ~1.5 times lighter than the bank's dearest, played) */
+enum { STRESS_PATCH = 3 };
 static int md = MD_A, fam_left, build_was_on, rhythm_on, pad_on, pad_left, stress;
 static uint8_t harm_mode_now = MHARM_MIX, harm_sound_now = MHSOUND_ORGAN;
 static const uint16_t STAB_PATTERNS[3] = {
@@ -1085,10 +1105,15 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
         rhythm_on = 0;
         pad_on = 1;
         rhythm_set(R_STABS); rhy.sus = 0.5f;
-        fm6_unpack(FM6_BANK[1], rhy_patch);   /* F6d: the dearest: ORGAN 1, six carriers, held */
+        fm6_unpack(FM6_BANK[STRESS_PATCH], rhy_patch);   /* the dearest: every operator sounding, held */
         layer_shape(&rhy, T_FM6, 0.3f, 50, 1.0f, 6000, 0, 0, 1.0f, 0.5f);
         for (int v = 0; v < 3; ++v) rhy.v[v].kind = 0;
-        layer_chord(&rhy, cur_chord, TRIAD, 1, 0.6f, 0, 1, 0.0f);
+        layer_chord(&rhy, cur_chord, TRIAD, 1, 1.0f, 0, 1, 0.0f);
+        if (pad_bank != STRESS_PATCH) {   /* the pad too (it kept the style's, some of its operators below the floor) */
+            fm6_unpack(FM6_BANK[STRESS_PATCH], pad_patch); pad_bank = STRESS_PATCH;
+            for (int v = 0; v < 3; ++v) pad.v[v].kind = 0;
+            layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 0, 0.0f);
+        }
         return;
     }
     rhythm_on = harm_mode_now != MHARM_PAD && !(form_on && harm_mode_now == MAUTO && sect()->harm == H_PAD);
@@ -1101,7 +1126,7 @@ static void harmony_phrase(void)   /* the harmony track's own phrase starts */
     else if (form_on && sect()->harm != H_RHY) pad_on = 1;   /* the section's pad */
     else if (--pad_left <= 0) { pad_on = rnd(100) < S->pad_pct; pad_left = 2 + (int)rnd(3); }   /* AUTO: a few phrases */
     if (pad_on) {
-        int b = stress ? 1 : PAD_BANK[track_style(TRK_HARMONY)];   /* F6d-2: the pad from the bank (the CPU test: ORGAN 1) */
+        int b = stress ? STRESS_PATCH : PAD_BANK[track_style(TRK_HARMONY)];   /* F6d-2: the pad from the bank (the CPU test's) */
         if (b != pad_bank) { fm6_unpack(FM6_BANK[b], pad_patch); pad_bank = (uint8_t)b; for (int v = 0; v < 3; ++v) pad.v[v].kind = 0; }
         layer_chord(&pad, cur_chord, COLOUR, 0, 1.0f, 0, 1, 0.0f);
     } else layer_release(&pad);
@@ -1270,8 +1295,8 @@ static void bass_plan(void)   /* the bass track's own phrase starts */
 }
 static void bass_step(int v)
 {
-    if (stress) {   /* the CPU test (F6d-2): ORGAN 1, six carriers, held */
-        if (v == 0) { fm6_unpack(FM6_BANK[1], bass_patch); bass.fmb = 1; bass_play(root_midi(cur_chord), 40.0f * vsps(TRK_BASS), 0, 1, 1.0f); }
+    if (stress) {   /* the CPU test: STRESS_PATCH, held */
+        if (v == 0) { fm6_unpack(FM6_BANK[STRESS_PATCH], bass_patch); bass.fmb = 1; bass_play(root_midi(cur_chord), 40.0f * vsps(TRK_BASS), 0, 1, 1.0f); }
         return;
     }
     if (v == 0) bass_plan();
@@ -1439,7 +1464,7 @@ static float lead_render(void)
         lead.vib_ph += 5.5f / SR;
         if (lead.vib_ph >= 1.0f) lead.vib_ph -= 1.0f;
         float inc = lead.freq * (1.0f + depth * 0.0578f * sine(lead.vib_ph)) * (1.0f / SR) * DRIFT(5) * (1.0f - lead.scoop);
-        lead.scoop *= 0.9985f;                                    /* the scoop: up into the note in ~15 ms */
+        lead.scoop = dn(lead.scoop * 0.9985f);                                    /* the scoop: up into the note in ~15 ms */
         lead.swell += (1.0f - lead.swell) * 0.0012f;               /* the brass's swell: ~20 ms */
         switch (snd) {
         case MMSOUND_SAW:
@@ -1486,7 +1511,7 @@ static float lead_render(void)
             break;
         }
     }
-    lead.fenv *= snd == MMSOUND_FM || snd == MMSOUND_VIBES ? 0.99985f : 0.9994f;
+    lead.fenv = dn(lead.fenv * (snd == MMSOUND_FM || snd == MMSOUND_VIBES ? 0.99985f : 0.9994f));
     if (lead.stage == 1) { lead.env += (1.05f - lead.env) * lead.ca; if (lead.env >= 1.0f) { lead.env = 1.0f; lead.stage = 2; } }
     else if (lead.stage == 2) lead.env += (SUS[snd] - lead.env) * lead.cd;
     else { lead.env -= lead.env * lead.cr; if (lead.env < 1e-4f) { lead.on = 0; lead.env = 0.0f; } }
@@ -1854,8 +1879,8 @@ static int mel_attack_at(uint32_t step)   /* 1: the melody attacks on that 16th 
 }
 static void mel_step(int v)
 {
-    if (stress) {   /* the CPU test (F6d-2): ORGAN 1, six carriers, held */
-        if (v == 0) { fm6_unpack(FM6_BANK[1], lead_patch); lead.fmb = 1; lead_note(72, 40.0f * vsps(TRK_MELODY), 1.0f); }
+    if (stress) {   /* the CPU test: STRESS_PATCH, held */
+        if (v == 0) { fm6_unpack(FM6_BANK[STRESS_PATCH], lead_patch); lead.fmb = 1; lead_note(72, 40.0f * vsps(TRK_MELODY), 1.0f); }
         return;
     }
     if (v == 0) { mel_plan(); mel_fit(); mel_shape(); }
@@ -2177,8 +2202,8 @@ MUS_AI float echo_tick(float in, float fb, float lp_k, float wobble)
     uint32_t r0 = (fx.e_w - (uint32_t)di) & (ECHO_N - 1u), r1 = (r0 - 1u) & (ECHO_N - 1u);
     float y = ((float)echo_buf[r0] + fr * (float)(echo_buf[r1] - echo_buf[r0])) * (1.0f / 8192.0f);
     /* round the loop: darker (the colour), no rumble (~120 Hz), the tape's saturation */
-    fx.e_lp += (y - fx.e_lp) * lp_k;
-    fx.e_hp += (fx.e_lp - fx.e_hp) * 0.034f;
+    fx.e_lp = dn(fx.e_lp + (y - fx.e_lp) * lp_k);
+    fx.e_hp = dn(fx.e_hp + (fx.e_lp - fx.e_hp) * 0.034f);
     float w = in + mus_tanhf(1.2f * fb * (fx.e_lp - fx.e_hp)) * (1.0f / 1.2f);
     w = w > 3.9f ? 3.9f : w < -3.9f ? -3.9f : w;
     echo_buf[fx.e_w & (ECHO_N - 1u)] = (int16_t)(w * 8192.0f);
@@ -2364,42 +2389,66 @@ static PLAT_RAM_CODE __attribute__((noinline)) void mix_chunk(int32_t *lr, unsig
     }
     mix_par = par;
 }
-static int fm_live(void)
+static int fm_vcost(const struct fm6v *f) { return (f->ops ? f->ops : 1) + 1; }
+static int fm_cost(void)
 {
-    int n = 0;
+    int c = 0;
     for (int v = 0; v < 3; ++v) {
-        n += pad.v[v].stage && pad.v[v].kind == T_FM6 && !pad.v[v].kill;
-        n += rhy.v[v].stage && rhy.v[v].kind == T_FM6 && !rhy.v[v].kill;
+        if (pad.v[v].stage && pad.v[v].kind == T_FM6 && !pad.v[v].kill) c += fm_vcost(pad.v[v].fm);
+        if (rhy.v[v].stage && rhy.v[v].kind == T_FM6 && !rhy.v[v].kill) c += fm_vcost(rhy.v[v].fm);
     }
-    return n + (bass.on && bass.fmb >= 0) + (lead.on && lead.fmb >= 0);
+    if (bass.on && bass.fmb >= 0) c += fm_vcost(&fm6_bass);
+    if (lead.on && lead.fmb >= 0) c += fm_vcost(&fm6_lead);
+    return c;
 }
-void music_overload(void) { ov_flag = 1; }
-void music_cpu_hint(unsigned pct) { cpu_hint = (int)pct; }
-static void governor(unsigned n)
+/* let harmony voices go (the pad's first, the releasing and the quietest first) till need is freed: what was freed */
+static int fm_make_room(int need, int releasing_only)
 {
-    if (ov_hold > 0) ov_hold -= (int)n;
-    if (ov_flag && ov_hold <= 0) {
+    int freed = 0;
+    while (freed < need) {
         struct voice *best = 0;
         float best_score = 1e9f;
         for (int l = 0; l < 2; ++l) {
             struct layer *L = l ? &rhy : &pad;
             for (int v = 0; v < 3; ++v) {
                 struct voice *h = &L->v[v];
-                if (!h->stage || h->kind != T_FM6 || h->kill) continue;
+                if (!h->stage || h->kind != T_FM6 || h->kill || (releasing_only && h->stage != 3)) continue;
                 float score = (float)l * 100.0f + (h->stage == 3 ? 0.0f : 10.0f) + h->env;
                 if (score < best_score) { best_score = score; best = h; }
             }
         }
-        if (best) { best->kill = 1; ++ov_shed; }
-        int live = fm_live();
-        fm_cap = live < 2 ? 2 : live;
+        if (!best) break;
+        best->kill = 1;
+        freed += fm_vcost(best->fm);
+    }
+    return freed;
+}
+void music_overload(void) { ov_flag = 1; }
+void music_cpu_hint(unsigned pct) { cpu_hint = (int)pct; }
+static void governor(unsigned n)
+{
+    if (ov_hold > 0) ov_hold -= (int)n;
+    if (ov_flag && ov_hold <= 0) {   /* too much: under what sounded, and that is the ceiling for now */
+        ++ov_shed;   /* (the screen: how many times since power-on) */
+        int c = fm_cost();
+        int b = c - 7;
+        if (b > fm_budget - 4) b = fm_budget - 4;   /* (at least a little lower each time) */
+        fm_budget = b < FM_BUDGET_MIN ? FM_BUDGET_MIN : b;
+        fm_ceil = fm_budget;
         ov_calm = 0.0f;
-        ov_hold = (int)(0.02f * SR);   /* the fade's time and a little: then look again */
-    } else if (fm_cap < 8 && (ov_calm += (float)n) > 4.0f * SR && cpu_hint < 75) {
-        ++fm_cap;
-        ov_calm = 0.0f;
+        ov_relax = -50.0f * SR;   /* the ceiling stays a minute */
+        ov_hold = (int)(0.03f * SR);   /* the fades' time and a little: then look again */
+    } else {
+        if ((ov_relax += (float)n) > 10.0f * SR) { ov_relax = 0.0f; fm_ceil = fm_ceil + 2 > FM_COST_MAX ? FM_COST_MAX : fm_ceil + 2; }
+        if ((ov_calm += (float)n) > 2.0f * SR) {
+            ov_calm = 0.0f;
+            if (cpu_hint < 70 && fm_budget < fm_ceil) fm_budget += 2;
+            if (fm_budget > fm_ceil) fm_budget = fm_ceil;
+        }
     }
     ov_flag = 0;
+    int over = fm_cost() - fm_budget;
+    if (over > 0) fm_make_room(over, 0);
 }
 /* OPT: the meter (EDIT held): the time of the tracks (their events and voices) and of the mix (the effects), on the
  * app's clock (music_clock: plat_ticks24); music_meter hands the sums over and starts them again */
@@ -2409,14 +2458,17 @@ void music_clock(uint32_t (*fn)(void)) { mclock = fn; }
 void music_meter(struct music_meter *m)
 {
     m->vox = m_vox; m->fx = m_fx; m_vox = m_fx = 0;
-    m->fm_live = (uint8_t)fm_live(); m->fm_cap = (uint8_t)fm_cap; m->shed = ov_shed;
+    m->fm_cost = (uint8_t)fm_cost(); m->fm_budget = (uint8_t)fm_budget; m->shed = ov_shed;
 }
-void music_meter_peek(struct music_meter *m) { m->vox = m->fx = 0; m->fm_live = (uint8_t)fm_live(); m->fm_cap = (uint8_t)fm_cap; m->shed = ov_shed; }
+void music_meter_peek(struct music_meter *m) { m->vox = m->fx = 0; m->fm_cost = (uint8_t)fm_cost(); m->fm_budget = (uint8_t)fm_budget; m->shed = ov_shed; }
 static void render_chunk(int32_t *lr, unsigned n)
 {
     unsigned e = 0;
     uint32_t t0 = mclock ? mclock() : 0u;
     governor(n);
+    fx.e_lp = dn(fx.e_lp); fx.e_hp = dn(fx.e_hp); fx.sp_lp = dn(fx.sp_lp); fx.sp_hp = dn(fx.sp_hp);   /* (OPT: denormals) */
+    for (int k = 0; k < 4; ++k) fx.rc_lp[k] = dn(fx.rc_lp[k]);
+    for (int k = 0; k < SP_STAGES; ++k) for (int c = 0; c < 2; ++c) { fx.sp_x[k][c] = dn(fx.sp_x[k][c]); fx.sp_y[k][c] = dn(fx.sp_y[k][c]); }
     drift_chunk(n);
     float tgt[TRACKS];
     for (int t = 0; t < TRACKS; ++t) {
