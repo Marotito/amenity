@@ -1,5 +1,19 @@
 # Amenity
 
+> **Este es el fork Amenity+ (rama `amenity-plus`)**, con **Facility**: un multitrack generativo de bajo,
+> armonía y melodía que toca con el break. **Instalador de esta versión:**
+> https://marotito.github.io/amenity/install/ · **Emulador:** https://marotito.github.io/amenity/emu/
+>
+> - [Manual de Facility](docs/amenity-plus/MANUAL.es.md) · [Guía de prueba](docs/amenity-plus/TESTING.es.md)
+>   · [Historial](docs/amenity-plus/CHANGELOG.es.md)
+> - Lo que sigue es el README del Amenity original. Sus enlaces a `ejtb76.github.io` instalan el Amenity
+>   original, **sin Facility**. En la página Amenity cambian cuatro botones: HOME, SAVE, ARP y SEQ son los mutes
+>   de las cuatro pistas, LFO hace los fills automáticos (antes SEQ) y EDIT + HOME vuelve al break derecho
+>   (antes HOME).
+>
+> *This is the Amenity+ fork, adding Facility, a generative bass / harmony / melody multitrack. Install it from
+> https://marotito.github.io/amenity/install/. The docs for testers are in Spanish (docs/amenity-plus/).*
+
 A live jungle firmware for the M-VAVE FM-1, by Presethead.
 
 Amenity plays a break, sliced into sixteen 8ths, and lets you tear it up live
