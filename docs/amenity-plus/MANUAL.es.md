@@ -2,6 +2,9 @@
 
 **Versión de prueba:** 2.0.1-dev25 · **Aparato:** M-VAVE FM-1 · **Rama:** `amenity-plus`
 
+> ¿Primera vez? Empezá por la [Guía de prueba desde cero](TESTING.es.md): explica todo sin conocimientos
+> previos. Este manual es la referencia técnica resumida.
+
 Amenity+ es un fork de [Amenity](https://github.com/ejtb76/amenity) (Presethead), el firmware de breaks en vivo
 para el FM-1. Mantiene todo Amenity y le suma **Facility**: un multitrack generativo de cuatro pistas que toca
 con el break.

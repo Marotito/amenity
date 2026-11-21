@@ -4,8 +4,9 @@
 > armonía y melodía que toca con el break. **Instalador de esta versión:**
 > https://marotito.github.io/amenity/install/ · **Emulador:** https://marotito.github.io/amenity/emu/
 >
-> - [Manual de Facility](docs/amenity-plus/MANUAL.es.md) · [Guía de prueba](docs/amenity-plus/TESTING.es.md)
->   · [Historial](docs/amenity-plus/CHANGELOG.es.md)
+> - **Empezá por la [Guía de prueba desde cero](docs/amenity-plus/TESTING.es.md)**: explica todo Amenity y
+>   Facility sin conocimientos previos. También hay un [manual técnico](docs/amenity-plus/MANUAL.es.md) y un
+>   [historial](docs/amenity-plus/CHANGELOG.es.md).
 > - Lo que sigue es el README del Amenity original. Sus enlaces a `ejtb76.github.io` instalan el Amenity
 >   original, **sin Facility**. En la página Amenity cambian cuatro botones: HOME, SAVE, ARP y SEQ son los mutes
 >   de las cuatro pistas, LFO hace los fills automáticos (antes SEQ) y EDIT + HOME vuelve al break derecho
